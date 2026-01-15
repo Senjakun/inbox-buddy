@@ -14,7 +14,90 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      bot_settings: {
+        Row: {
+          created_at: string
+          email_filter: string | null
+          id: string
+          is_active: boolean | null
+          outlook_email: string | null
+          outlook_password: string | null
+          polling_interval_minutes: number | null
+          telegram_bot_token: string | null
+          telegram_owner_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          email_filter?: string | null
+          id?: string
+          is_active?: boolean | null
+          outlook_email?: string | null
+          outlook_password?: string | null
+          polling_interval_minutes?: number | null
+          telegram_bot_token?: string | null
+          telegram_owner_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          email_filter?: string | null
+          id?: string
+          is_active?: boolean | null
+          outlook_email?: string | null
+          outlook_password?: string | null
+          polling_interval_minutes?: number | null
+          telegram_bot_token?: string | null
+          telegram_owner_id?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      processed_emails: {
+        Row: {
+          id: string
+          message_id: string
+          processed_at: string
+          sender: string | null
+          subject: string | null
+        }
+        Insert: {
+          id?: string
+          message_id: string
+          processed_at?: string
+          sender?: string | null
+          subject?: string | null
+        }
+        Update: {
+          id?: string
+          message_id?: string
+          processed_at?: string
+          sender?: string | null
+          subject?: string | null
+        }
+        Relationships: []
+      }
+      sent_messages: {
+        Row: {
+          chat_id: string
+          id: string
+          sent_at: string
+          telegram_message_id: string
+        }
+        Insert: {
+          chat_id: string
+          id?: string
+          sent_at?: string
+          telegram_message_id: string
+        }
+        Update: {
+          chat_id?: string
+          id?: string
+          sent_at?: string
+          telegram_message_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
