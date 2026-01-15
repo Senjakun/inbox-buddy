@@ -1,0 +1,15 @@
+{
+  "name": "telegram-email-bot",
+  "version": "1.0.0",
+  "description": "Real-time Telegram Email Bot with IMAP IDLE",
+  "main": "telegram-email-bot.js",
+  "scripts": {
+    "start": "node telegram-email-bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1",
+    "imap": "^0.8.19",
+    "mailparser": "^3.6.5",
+    "node-telegram-bot-api": "^0.64.0"
+  }
+}
