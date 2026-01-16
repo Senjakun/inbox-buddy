@@ -34,7 +34,7 @@ async function fetchSettings() {
     .from('bot_settings')
     .select('*')
     .limit(1)
-    .single();
+    .maybeSingle();
   
   if (error) {
     console.error('❌ Error fetching settings:', error.message);
