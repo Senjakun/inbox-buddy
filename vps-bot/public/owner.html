@@ -407,7 +407,7 @@
     // Test IMAP
     testImapBtn.addEventListener('click', async () => {
       const email = outlookEmail.value.trim();
-      const password = outlookPassword.value.trim();
+      const password = String(outlookPassword.value || '').replace(/\s+/g, '').trim();
       const host = imapHost.value.trim();
 
       if (!email) return showToast('Isi email dulu', 'error');
@@ -428,20 +428,48 @@
           })
         });
 
-        const payload = await res.json().catch(() => ({}));
+        // Server kadang balas non-JSON (mis. reverse proxy error).
+        // Kita tampilkan raw text biar user tahu error aslinya.
+        let raw = '';
+        let payload = {};
+        try {
+          raw = await res.text();
+          payload = raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          payload = {};
+        }
 
         if (res.ok && payload.success) {
-          showToast(`✅ IMAP login OK (${payload.host})`);
-        } else {
-          const msg = payload.error || 'IMAP login gagal';
-          if (String(msg).toLowerCase().includes('login failed')) {
-            showToast('LOGIN failed. Biasanya: App Password salah / ada spasi / email alias bukan primary.', 'error');
+          if (payload.fallback_from) {
+            showToast(`✅ IMAP login OK (${payload.host}) | fallback dari ${payload.fallback_from}`);
           } else {
-            showToast(msg, 'error');
+            showToast(`✅ IMAP login OK (${payload.host})`);
           }
+          return;
         }
+
+        const msg = payload.error || raw || `IMAP login gagal (HTTP ${res.status})`;
+        const msgLower = String(msg).toLowerCase();
+
+        if (msgLower.includes('login failed') || payload.source === 'authentication') {
+          showToast('LOGIN failed. Cek: App Password benar (tanpa spasi), 2FA aktif, dan email = PRIMARY ALIAS.', 'error');
+          return;
+        }
+
+        if (payload.source === 'timeout-auth' || msgLower.includes('timed out')) {
+          showToast('Timeout auth. Biasanya port 993 diblokir / koneksi ke Outlook lambat. Coba host outlook.office365.com.', 'error');
+          return;
+        }
+
+        // Kalau ada fallback_error, tampilkan ringkas biar jelas 2 host sama-sama gagal
+        if (payload.fallback_error?.message) {
+          showToast(`Gagal di 2 host. 1) ${msg} | 2) ${payload.fallback_error.message}`, 'error');
+          return;
+        }
+
+        showToast(msg, 'error');
       } catch (error) {
-        showToast('Error test IMAP', 'error');
+        showToast('Error test IMAP (gagal konek ke server)', 'error');
       }
 
       testImapBtn.disabled = false;

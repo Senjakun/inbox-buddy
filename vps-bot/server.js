@@ -155,7 +155,8 @@ app.post('/api/test-imap', async (req, res) => {
 
   const host = String(imap_host || settings.imap_host || 'imap-mail.outlook.com').trim();
   const user = String(outlook_email || settings.outlook_email || '').trim();
-  const password = String(outlook_password || '').trim();
+  // App Password kadang ada spasi waktu di-copy; aman kita hapus semua whitespace
+  const password = String(outlook_password || '').replace(/\s+/g, '').trim();
 
   if (!user) {
     return res.status(400).json({ error: 'Email kosong' });
@@ -166,16 +167,44 @@ app.post('/api/test-imap', async (req, res) => {
     return res.status(400).json({ error: 'Masukkan App Password untuk test' });
   }
 
+  const normalizeErr = (err) => ({
+    message: err?.message || String(err),
+    source: err?.source,
+    type: err?.type,
+  });
+
+  const KNOWN_HOSTS = ['imap-mail.outlook.com', 'outlook.office365.com'];
+
   try {
     await testImapLogin({ host, user, password });
     return res.json({ success: true, host });
   } catch (err) {
-    const message = err?.message || String(err);
+    const first = normalizeErr(err);
+
+    // Auto fallback: kalau host 1 gagal, coba host satunya.
+    if (KNOWN_HOSTS.includes(host)) {
+      const fallbackHost = KNOWN_HOSTS.find((h) => h !== host);
+      try {
+        await testImapLogin({ host: fallbackHost, user, password });
+        return res.json({ success: true, host: fallbackHost, fallback_from: host });
+      } catch (err2) {
+        const second = normalizeErr(err2);
+        return res.status(400).json({
+          success: false,
+          error: first.message,
+          source: first.source,
+          type: first.type,
+          tried_hosts: [host, fallbackHost],
+          fallback_error: second,
+        });
+      }
+    }
+
     return res.status(400).json({
       success: false,
-      error: message,
-      source: err?.source,
-      type: err?.type,
+      error: first.message,
+      source: first.source,
+      type: first.type,
     });
   }
 });
