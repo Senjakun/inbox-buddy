@@ -21,7 +21,7 @@ const DEFAULT_SETTINGS = {
   telegram_owner_id: '',
   outlook_email: '',
   outlook_password: '',
-  imap_host: 'imap.gmail.com',
+  imap_host: 'imap-mail.outlook.com',
   polling_interval_minutes: 1,
   email_filter: 'OTP',
   is_active: false,
