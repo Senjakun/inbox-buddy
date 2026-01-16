@@ -1,90 +1,130 @@
-# Telegram Email Bot (VPS - Real-time)
+# Telegram Email Bot - Self-Hosted
 
-Bot untuk forward email Outlook ke Telegram secara **real-time** menggunakan IMAP IDLE.
+Bot Telegram yang forward email Outlook ke chat Telegram secara real-time menggunakan IMAP IDLE.
 
-**✨ Settings diambil otomatis dari database!** Atur via `/owner` page di web app.
-
-## 🚀 Quick Install
+## 🚀 Quick Install (VPS)
 
 ```bash
-# 1. Masuk ke VPS
-ssh root@your-vps-ip
-
-# 2. Clone repo (atau git pull jika sudah ada)
-git clone https://github.com/Senjakun/inbox-buddy.git
+# Clone repo
+git clone https://github.com/YOUR_USERNAME/inbox-buddy.git
 cd inbox-buddy/vps-bot
 
-# 3. Install dependencies
+# Install dependencies
 npm install
 
-# 4. Test run (settings dari database)
-node telegram-email-bot.js
+# Start web server untuk konfigurasi
+pm2 start server.js --name email-server
 
-# 5. Run dengan PM2 (production)
-npm install -g pm2
-pm2 start telegram-email-bot.js --name email-bot
+# Buka browser: http://YOUR_IP:3000/owner
+# Login dengan secret default: GANTI_SECRET_INI
+# (PENTING: Edit settings.json dan ganti owner_secret!)
+
+# Setelah konfigurasi, start bot
+pm2 start telegram-bot-standalone.js --name email-bot
 pm2 save
-pm2 startup  # Supaya auto-start saat reboot
+pm2 startup
 ```
 
-## ⚙️ Setup Settings
+## 📝 Setup Steps
 
-**Tidak perlu edit .env!** Settings diambil dari database:
+### 1. Edit Owner Secret (WAJIB!)
+Setelah `npm install` dan start server pertama kali, file `settings.json` akan dibuat. Edit:
+```bash
+nano settings.json
+# Ganti "owner_secret": "GANTI_SECRET_INI" dengan secret kamu sendiri
+```
 
-1. Buka app Lovable kamu di browser
-2. Pergi ke `/owner`
-3. Login dengan OWNER_SECRET
-4. Isi kredensial:
-   - Telegram Bot Token (dari @BotFather)
-   - Telegram Owner ID (dari /myid command)
-   - Outlook Email
-   - Outlook App Password (16 karakter)
-5. Aktifkan toggle "Bot Aktif"
-6. Klik Save
+### 2. Buka Web Config
+- Akses `http://YOUR_VPS_IP:3000/owner`
+- Login dengan owner_secret yang sudah kamu set
+- Isi semua field:
+  - **Telegram Bot Token**: Dari @BotFather
+  - **Owner Chat ID**: Dari @userinfobot
+  - **Outlook Email**: Email outlook kamu
+  - **App Password**: Password atau App Password (jika 2FA aktif)
+  - **Email Filter**: Kata kunci di subject (misal: OTP)
+- Aktifkan bot dan Save
 
-Bot VPS akan otomatis mengambil settings tersebut!
-
-### Cara Dapat App Password:
+### 3. Cara Dapat App Password (Jika 2FA Aktif)
 1. Buka https://account.microsoft.com/security
-2. Aktifkan 2FA
-3. Klik "App passwords" → "Create new app password"
-4. Copy password 16 karakter
+2. Klik "Advanced security options"
+3. Scroll ke "App passwords" → "Create a new app password"
+4. Copy password yang muncul
 
-### Cara Dapat Chat ID:
-1. Chat @userinfobot di Telegram
-2. Copy angka ID kamu
+### 4. Cara Dapat Telegram Chat ID
+1. Buka Telegram, cari @userinfobot
+2. Klik /start
+3. Bot akan reply dengan Chat ID kamu
 
-## 📱 Commands Telegram
+## 🤖 Telegram Commands
 
-- `/start` - Info bot
-- `/status` - Cek status
-- `/myid` - Lihat Chat ID kamu
-- `/reload` - Reload settings dari database (owner only)
+| Command | Deskripsi |
+|---------|-----------|
+| `/start` | Info bot |
+| `/status` | Cek status monitoring |
+| `/myid` | Lihat Chat ID kamu |
+| `/reload` | Reload settings dari file |
 
 ## 🔧 PM2 Commands
 
 ```bash
-pm2 status          # Lihat status
-pm2 logs email-bot  # Lihat logs
-pm2 restart email-bot
-pm2 stop email-bot
-pm2 delete email-bot
+pm2 status              # Lihat status semua proses
+pm2 logs email-bot      # Lihat log bot
+pm2 logs email-server   # Lihat log web server
+pm2 restart email-bot   # Restart bot setelah edit settings
+pm2 restart all         # Restart semua
+pm2 stop all            # Stop semua
 ```
 
-## ⚠️ Troubleshooting
+## 📁 File Structure
 
-**Cannot start bot?**
-- Pastikan sudah setup settings di `/owner` page
-- Pastikan bot diaktifkan (is_active = true)
+```
+vps-bot/
+├── server.js                    # Web server untuk /owner config (port 3000)
+├── telegram-bot-standalone.js   # Bot utama (baca settings.json)
+├── telegram-email-bot.js        # Bot versi Cloud (opsional)
+├── settings.json                # Settings lokal (auto-created)
+├── public/
+│   └── owner.html               # Web UI untuk konfigurasi
+└── package.json
+```
 
-**Login failed?**
-- Pastikan pakai App Password, bukan password biasa
-- Buat App Password di: https://account.microsoft.com/security
+## 🔒 Security Notes
+
+- **WAJIB** ganti `owner_secret` di settings.json sebelum share ke teman!
+- Settings.json berisi credentials sensitif - jangan commit ke public repo
+- Tambahkan `settings.json` ke `.gitignore`:
+  ```bash
+  echo "settings.json" >> .gitignore
+  ```
+
+## 🐛 Troubleshooting
+
+**Bot tidak start?**
+- Cek `pm2 logs email-bot`
+- Pastikan semua field terisi di /owner
+- Pastikan is_active = true
+
+**Tidak bisa login IMAP?**
+- Gunakan App Password jika 2FA aktif
+- Pastikan email benar (outlook.com/hotmail.com)
+
+**Tidak menerima email?**
+- Cek filter subject sudah benar
+- Kirim test email ke diri sendiri
+- Kosongkan filter untuk terima semua email
 
 **Settings berubah tapi bot tidak update?**
 - Kirim `/reload` ke bot di Telegram
 - Atau restart: `pm2 restart email-bot`
 
-**Tidak terima email?**
-- Cek logs: `pm2 logs email-bot`
-- Pastikan Email Filter kosong untuk terima semua email
+## 🆚 Cloud vs Standalone
+
+| Feature | Standalone | Cloud |
+|---------|------------|-------|
+| Database | Local JSON | Supabase |
+| Web Config | Self-hosted (:3000) | Lovable App |
+| Setup | Clone & Run | Perlu akun Lovable |
+| Multi-user | Per-VPS | Shared database |
+
+Untuk versi Cloud (pakai Supabase), jalankan: `npm run cloud`
