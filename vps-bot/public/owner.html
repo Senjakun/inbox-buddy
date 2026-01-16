@@ -286,6 +286,14 @@
           <p class="hint">Gunakan App Password jika 2FA aktif</p>
         </div>
         <div class="form-group">
+          <label for="imapHost">IMAP Server</label>
+          <select id="imapHost" style="width: 100%; padding: 12px 14px; border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; background: rgba(0,0,0,0.3); color: #fff; font-size: 0.95rem;">
+            <option value="imap-mail.outlook.com">imap-mail.outlook.com (Personal)</option>
+            <option value="outlook.office365.com">outlook.office365.com (Office 365)</option>
+          </select>
+          <p class="hint">Pilih sesuai tipe akun Outlook Anda</p>
+        </div>
+        <div class="form-group">
           <label for="emailFilter">Email Filter (Subject Contains)</label>
           <input type="text" id="emailFilter" placeholder="OTP">
           <p class="hint">Hanya forward email yang subject mengandung kata ini</p>
@@ -323,6 +331,7 @@
     const ownerId = document.getElementById('ownerId');
     const outlookEmail = document.getElementById('outlookEmail');
     const outlookPassword = document.getElementById('outlookPassword');
+    const imapHost = document.getElementById('imapHost');
     const emailFilter = document.getElementById('emailFilter');
     const statusDot = document.getElementById('statusDot');
     const statusText = document.getElementById('statusText');
@@ -370,6 +379,7 @@
           // Populate form
           ownerId.value = data.settings.telegram_owner_id || '';
           outlookEmail.value = data.settings.outlook_email || '';
+          imapHost.value = data.settings.imap_host || 'imap-mail.outlook.com';
           emailFilter.value = data.settings.email_filter || 'OTP';
           isActive.checked = data.settings.is_active || false;
           updateStatusUI(isActive.checked);
@@ -402,6 +412,7 @@
         owner_secret: ownerSecret,
         telegram_owner_id: ownerId.value,
         outlook_email: outlookEmail.value,
+        imap_host: imapHost.value,
         email_filter: emailFilter.value,
         is_active: isActive.checked
       };

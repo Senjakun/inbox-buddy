@@ -21,6 +21,7 @@ const DEFAULT_SETTINGS = {
   telegram_owner_id: '',
   outlook_email: '',
   outlook_password: '',
+  imap_host: 'imap-mail.outlook.com',
   polling_interval_minutes: 1,
   email_filter: 'OTP',
   is_active: false,
@@ -89,6 +90,7 @@ app.post('/api/update-settings', (req, res) => {
   if (updates.telegram_owner_id !== undefined) newSettings.telegram_owner_id = updates.telegram_owner_id;
   if (updates.outlook_email !== undefined) newSettings.outlook_email = updates.outlook_email;
   if (updates.outlook_password) newSettings.outlook_password = updates.outlook_password;
+  if (updates.imap_host !== undefined) newSettings.imap_host = updates.imap_host;
   if (updates.polling_interval_minutes !== undefined) newSettings.polling_interval_minutes = updates.polling_interval_minutes;
   if (updates.email_filter !== undefined) newSettings.email_filter = updates.email_filter;
   if (updates.is_active !== undefined) newSettings.is_active = updates.is_active;
