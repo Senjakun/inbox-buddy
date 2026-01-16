@@ -50,10 +50,19 @@ function loadSettings() {
       email: {
         user: data.outlook_email,
         password: data.outlook_password,
-        host: 'imap-mail.outlook.com',
+        // Default for personal outlook.com accounts
+        // (Some environments work better with outlook.office365.com)
+        host: (data.imap_host || 'imap-mail.outlook.com').trim(),
         port: 993,
         tls: true,
-        tlsOptions: { rejectUnauthorized: false }
+        // Outlook IMAP can be slow; increase timeouts to avoid timeout-auth
+        connTimeout: 30000,
+        authTimeout: 30000,
+        keepalive: true,
+        tlsOptions: {
+          rejectUnauthorized: false,
+          servername: (data.imap_host || 'imap-mail.outlook.com').trim(),
+        },
       },
       emailFilter: data.email_filter || '',
       autoDeleteAfterDays: 7,
@@ -170,6 +179,7 @@ async function cleanupOldMessages() {
 
 // IMAP connection with IDLE
 function startIMAP() {
+  console.log(`📡 Connecting IMAP: ${config.email.host}:${config.email.port} ...`);
   imap = new Imap(config.email);
   
   imap.once('ready', () => {
@@ -212,7 +222,15 @@ function startIMAP() {
   });
   
   imap.once('error', (err) => {
+    const msg = err?.message || String(err);
     console.error('❌ IMAP Error:', err);
+
+    // Most common: Outlook auth timeout (app password/IMAP access/basic auth)
+    if (err?.source === 'timeout-auth' || msg.toLowerCase().includes('timed out while authenticating')) {
+      console.error('👉 IMAP auth timeout. Cek: App Password benar (tanpa spasi), IMAP diaktifkan di Outlook, dan port 993 tidak diblokir dari VPS.');
+      console.error("👉 Kalau masih timeout, coba set IMAP Host ke 'outlook.office365.com' via settings.json (opsional).");
+    }
+
     setTimeout(startIMAP, 5000);
   });
   
@@ -312,6 +330,7 @@ async function main() {
   
   console.log(`\n✅ Settings loaded!`);
   console.log(`📧 Email: ${config.email.user}`);
+  console.log(`🌐 IMAP Host: ${config.email.host}:${config.email.port}`);
   console.log(`🔍 Filter: ${config.emailFilter || 'All emails'}`);
   console.log(`👤 Owner ID: ${config.telegram.ownerId}`);
   
