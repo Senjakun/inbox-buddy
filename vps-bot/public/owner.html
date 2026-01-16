@@ -303,8 +303,8 @@
       <!-- Actions -->
       <div class="btn-group">
         <button class="btn btn-primary" id="saveBtn">💾 Save Settings</button>
+        <button class="btn btn-secondary" id="testImapBtn">🧪 Test IMAP Login</button>
       </div>
-
       <p style="text-align: center; margin-top: 20px; color: #71717a; font-size: 0.85rem;">
         Setelah save, restart bot: <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 4px;">pm2 restart email-bot</code>
       </p>
@@ -323,6 +323,7 @@
     const loginBtn = document.getElementById('loginBtn');
     const loginSecret = document.getElementById('loginSecret');
     const saveBtn = document.getElementById('saveBtn');
+    const testImapBtn = document.getElementById('testImapBtn');
     const toast = document.getElementById('toast');
 
     // Form elements
@@ -401,6 +402,50 @@
     // Enter key for login
     loginSecret.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') loginBtn.click();
+    });
+
+    // Test IMAP
+    testImapBtn.addEventListener('click', async () => {
+      const email = outlookEmail.value.trim();
+      const password = outlookPassword.value.trim();
+      const host = imapHost.value.trim();
+
+      if (!email) return showToast('Isi email dulu', 'error');
+      if (!password) return showToast('Isi App Password dulu untuk test', 'error');
+
+      testImapBtn.disabled = true;
+      testImapBtn.textContent = 'Testing...';
+
+      try {
+        const res = await fetch('/api/test-imap', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            owner_secret: ownerSecret,
+            outlook_email: email,
+            outlook_password: password,
+            imap_host: host,
+          })
+        });
+
+        const payload = await res.json().catch(() => ({}));
+
+        if (res.ok && payload.success) {
+          showToast(`✅ IMAP login OK (${payload.host})`);
+        } else {
+          const msg = payload.error || 'IMAP login gagal';
+          if (String(msg).toLowerCase().includes('login failed')) {
+            showToast('LOGIN failed. Biasanya: App Password salah / ada spasi / email alias bukan primary.', 'error');
+          } else {
+            showToast(msg, 'error');
+          }
+        }
+      } catch (error) {
+        showToast('Error test IMAP', 'error');
+      }
+
+      testImapBtn.disabled = false;
+      testImapBtn.textContent = '🧪 Test IMAP Login';
     });
 
     // Save

@@ -228,7 +228,15 @@ function startIMAP() {
     // Most common: Outlook auth timeout (app password/IMAP access/basic auth)
     if (err?.source === 'timeout-auth' || msg.toLowerCase().includes('timed out while authenticating')) {
       console.error('👉 IMAP auth timeout. Cek: App Password benar (tanpa spasi), IMAP diaktifkan di Outlook, dan port 993 tidak diblokir dari VPS.');
-      console.error("👉 Kalau masih timeout, coba set IMAP Host ke 'outlook.office365.com' via settings.json (opsional).");
+      console.error("👉 Kalau masih timeout, coba set IMAP Host ke 'outlook.office365.com' via /owner (opsional).");
+    }
+
+    // Explicit login failure
+    if (err?.source === 'authentication' || msg.toLowerCase().includes('login failed')) {
+      console.error('👉 LOGIN failed biasanya karena:');
+      console.error('   1) App Password salah / kepaste ada spasi');
+      console.error('   2) Email yang dipakai bukan PRIMARY ALIAS (lihat Outlook: Settings → Email aliases)');
+      console.error("   3) Coba ganti IMAP Host ke 'outlook.office365.com' (kadang lebih cocok dari VPS)");
     }
 
     setTimeout(startIMAP, 5000);

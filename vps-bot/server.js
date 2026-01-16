@@ -8,6 +8,7 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
+const Imap = require('imap');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -103,6 +104,80 @@ app.post('/api/update-settings', (req, res) => {
 app.get('/api/bot-settings', (req, res) => {
   const settings = loadSettings();
   res.json({ settings });
+});
+
+function testImapLogin({ host, user, password, port = 993 }) {
+  return new Promise((resolve, reject) => {
+    const imap = new Imap({
+      user,
+      password,
+      host,
+      port,
+      tls: true,
+      connTimeout: 30000,
+      authTimeout: 30000,
+      keepalive: false,
+      tlsOptions: {
+        rejectUnauthorized: false,
+        servername: host,
+      },
+    });
+
+    const done = (err) => {
+      try {
+        imap.end();
+      } catch (_) {
+        // ignore
+      }
+      if (err) reject(err);
+      else resolve(true);
+    };
+
+    imap.once('ready', () => done());
+    imap.once('error', (err) => done(err));
+
+    try {
+      imap.connect();
+    } catch (err) {
+      done(err);
+    }
+  });
+}
+
+// API: Test IMAP login (requires auth)
+app.post('/api/test-imap', async (req, res) => {
+  const { owner_secret, outlook_email, outlook_password, imap_host } = req.body || {};
+  const settings = loadSettings();
+
+  if (!owner_secret || owner_secret !== settings.owner_secret) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const host = String(imap_host || settings.imap_host || 'imap-mail.outlook.com').trim();
+  const user = String(outlook_email || settings.outlook_email || '').trim();
+  const password = String(outlook_password || '').trim();
+
+  if (!user) {
+    return res.status(400).json({ error: 'Email kosong' });
+  }
+
+  // For security: require password to be provided explicitly for tests
+  if (!password) {
+    return res.status(400).json({ error: 'Masukkan App Password untuk test' });
+  }
+
+  try {
+    await testImapLogin({ host, user, password });
+    return res.json({ success: true, host });
+  } catch (err) {
+    const message = err?.message || String(err);
+    return res.status(400).json({
+      success: false,
+      error: message,
+      source: err?.source,
+      type: err?.type,
+    });
+  }
 });
 
 // Serve owner page
