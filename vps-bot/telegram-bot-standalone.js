@@ -13,6 +13,7 @@ const { simpleParser } = require('mailparser');
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
 const path = require('path');
+const { exec } = require('child_process');
 
 const SETTINGS_FILE = path.join(__dirname, 'settings.json');
 
@@ -226,7 +227,7 @@ function startIMAP() {
 // Telegram bot commands
 function setupBotCommands() {
   bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, `👋 Bot Email aktif!\n\n📧 Email: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua email'}\n🗑️ Auto-delete: ${config.autoDeleteAfterDays} hari\n\nCommands:\n/status - Cek status\n/myid - Lihat Chat ID\n/reload - Reload settings`);
+    bot.sendMessage(msg.chat.id, `👋 Bot Email aktif!\n\n📧 Email: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua email'}\n🗑️ Auto-delete: ${config.autoDeleteAfterDays} hari\n\nCommands:\n/status - Cek status\n/myid - Lihat Chat ID\n/reload - Reload settings\n/update - Update bot dari GitHub`);
   });
 
   bot.onText(/\/status/, (msg) => {
@@ -259,6 +260,34 @@ function setupBotCommands() {
     } else {
       bot.sendMessage(msg.chat.id, '❌ Failed to reload settings.');
     }
+  });
+
+  bot.onText(/\/update/, async (msg) => {
+    if (msg.chat.id.toString() !== config.telegram.ownerId) {
+      return bot.sendMessage(msg.chat.id, '❌ Hanya owner yang bisa update bot.');
+    }
+    
+    bot.sendMessage(msg.chat.id, '🔄 Updating bot dari GitHub...');
+    
+    const projectDir = path.join(__dirname, '..');
+    
+    exec(`cd ${projectDir} && git pull origin main`, (error, stdout, stderr) => {
+      if (error) {
+        bot.sendMessage(msg.chat.id, `❌ Git pull gagal:\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' });
+        return;
+      }
+      
+      const gitOutput = stdout.trim() || 'No changes';
+      bot.sendMessage(msg.chat.id, `✅ Git pull berhasil:\n\`\`\`\n${gitOutput}\n\`\`\`\n\n🔄 Restarting bot...`, { parse_mode: 'Markdown' });
+      
+      // Restart bot via PM2
+      exec('pm2 restart email-bot', (err2, stdout2, stderr2) => {
+        if (err2) {
+          bot.sendMessage(msg.chat.id, `⚠️ Bot updated tapi restart gagal. Manual restart: pm2 restart email-bot`);
+        }
+        // Bot will restart, so this message might not be sent
+      });
+    });
   });
 }
 
