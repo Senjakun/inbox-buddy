@@ -131,11 +131,18 @@ async function processEmail(buffer) {
       messageId: parsed.messageId || `msg-${Date.now()}`
     };
     
-    if (config.emailFilter && !email.subject.toLowerCase().includes(config.emailFilter.toLowerCase())) {
-      console.log(`⏭️ Skipped (filter): ${email.subject}`);
-      return;
+    // Check filter - empty/whitespace filter = forward all emails
+    const filter = (config.emailFilter || '').trim();
+    if (filter) {
+      const subjectLower = email.subject.toLowerCase().trim();
+      const filterLower = filter.toLowerCase();
+      if (!subjectLower.includes(filterLower)) {
+        console.log(`⏭️ Skipped (filter "${filter}"): ${email.subject}`);
+        return;
+      }
     }
     
+    console.log(`📧 Processing email: ${email.subject}`);
     await sendToTelegram(email);
   } catch (error) {
     console.error('❌ Error processing email:', error.message);
