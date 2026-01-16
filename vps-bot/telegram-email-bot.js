@@ -11,13 +11,14 @@
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const TelegramBot = require('node-telegram-bot-api');
-const { createClient } = require('@supabase/supabase-js');
 
-// Supabase configuration - same as your Lovable project
-const SUPABASE_URL = 'https://fqynkjlckhqcsahstasm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZxeW5ramxja2hxY3NhaHN0YXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg0ODIwNDYsImV4cCI6MjA4NDA1ODA0Nn0.28JTukSi9q10f1C-ewQiqv5c9afg1f36F_o5JKb4IeY';
+// Backend configuration (Lovable Cloud)
+// Prefer env vars; fall back to the project's URL for convenience.
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://fqynkjlckhqcsahstasm.supabase.co';
+const OWNER_SECRET = process.env.OWNER_SECRET;
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// The bot fetches settings through a backend function (avoids RLS issues)
+const SETTINGS_ENDPOINT = process.env.SETTINGS_ENDPOINT || `${SUPABASE_URL}/functions/v1/get-settings-bot`;
 
 let config = null;
 let bot = null;
@@ -26,48 +27,63 @@ let imap = null;
 // Store sent messages for auto-delete
 const sentMessages = new Map();
 
-// Fetch settings from database
+// Fetch settings from backend
 async function fetchSettings() {
-  console.log('🔄 Fetching settings from database...');
-  
-  const { data, error } = await supabase
-    .from('bot_settings')
-    .select('*')
-    .limit(1)
-    .maybeSingle();
-  
-  if (error) {
-    console.error('❌ Error fetching settings:', error.message);
+  console.log('🔄 Fetching settings from backend...');
+
+  if (!OWNER_SECRET) {
+    console.error('❌ Missing OWNER_SECRET env var!');
+    console.error('👉 Set OWNER_SECRET on the VPS (same secret used to login at /owner).');
     return null;
   }
-  
-  if (!data) {
-    console.error('❌ No settings found in database!');
-    console.error('👉 Go to your app /owner page to configure settings first.');
+
+  try {
+    const response = await fetch(SETTINGS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ owner_secret: OWNER_SECRET }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error('❌ Error fetching settings:', payload.error || response.statusText);
+      return null;
+    }
+
+    const data = payload.settings;
+
+    if (!data) {
+      console.error('❌ No settings found in database!');
+      console.error('👉 Go to your app /owner page to configure settings first.');
+      return null;
+    }
+
+    if (!data.is_active) {
+      console.log('⏸️ Bot is disabled in settings. Enable it from /owner page.');
+      return null;
+    }
+
+    return {
+      telegram: {
+        token: data.telegram_bot_token,
+        ownerId: data.telegram_owner_id,
+      },
+      email: {
+        user: data.outlook_email,
+        password: data.outlook_password,
+        host: 'imap-mail.outlook.com',
+        port: 993,
+        tls: true,
+        tlsOptions: { rejectUnauthorized: false }
+      },
+      emailFilter: data.email_filter || '',
+      autoDeleteAfterDays: 7,
+    };
+  } catch (error) {
+    console.error('❌ Error fetching settings:', error.message || error);
     return null;
   }
-  
-  if (!data.is_active) {
-    console.log('⏸️ Bot is disabled in settings. Enable it from /owner page.');
-    return null;
-  }
-  
-  return {
-    telegram: {
-      token: data.telegram_bot_token,
-      ownerId: data.telegram_owner_id,
-    },
-    email: {
-      user: data.outlook_email,
-      password: data.outlook_password,
-      host: 'imap-mail.outlook.com',
-      port: 993,
-      tls: true,
-      tlsOptions: { rejectUnauthorized: false }
-    },
-    emailFilter: data.email_filter || '',
-    autoDeleteAfterDays: 7,
-  };
 }
 
 // Validate config
