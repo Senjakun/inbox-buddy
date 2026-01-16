@@ -1,7 +1,9 @@
 /**
  * Telegram Email Bot - VPS Version with IMAP IDLE (Real-time)
  * 
- * Install: npm install imap mailparser node-telegram-bot-api dotenv
+ * Fetches settings from Supabase database (same as /owner page)
+ * 
+ * Install: npm install imap mailparser node-telegram-bot-api @supabase/supabase-js
  * Run: node telegram-email-bot.js
  * With PM2: pm2 start telegram-email-bot.js --name email-bot
  */
@@ -9,38 +11,85 @@
 const Imap = require('imap');
 const { simpleParser } = require('mailparser');
 const TelegramBot = require('node-telegram-bot-api');
-require('dotenv').config();
+const { createClient } = require('@supabase/supabase-js');
 
-// Configuration from environment variables
-const config = {
-  telegram: {
-    token: process.env.TELEGRAM_BOT_TOKEN,
-    ownerId: process.env.TELEGRAM_OWNER_ID,
-  },
-  email: {
-    user: process.env.OUTLOOK_EMAIL,
-    password: process.env.OUTLOOK_PASSWORD, // App Password if 2FA enabled
-    host: 'imap-mail.outlook.com',
-    port: 993,
-    tls: true,
-    tlsOptions: { rejectUnauthorized: false }
-  },
-  emailFilter: process.env.EMAIL_FILTER || '', // Empty = all emails
-  autoDeleteAfterDays: parseInt(process.env.AUTO_DELETE_DAYS) || 7,
-};
+// Supabase configuration - same as your Lovable project
+const SUPABASE_URL = 'https://fqynkjlckhqcsahstasm.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZxeW5ramxja2hxY3NhaHN0YXNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg0ODIwNDYsImV4cCI6MjA4NDA1ODA0Nn0.28JTukSi9q10f1C-ewQiqv5c9afg1f36F_o5JKb4IeY';
 
-// Validate config
-if (!config.telegram.token || !config.telegram.ownerId || !config.email.user || !config.email.password) {
-  console.error('❌ Missing required environment variables!');
-  console.error('Required: TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID, OUTLOOK_EMAIL, OUTLOOK_PASSWORD');
-  process.exit(1);
-}
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Initialize Telegram Bot
-const bot = new TelegramBot(config.telegram.token, { polling: true });
+let config = null;
+let bot = null;
+let imap = null;
 
 // Store sent messages for auto-delete
-const sentMessages = new Map(); // messageId -> { chatId, sentAt }
+const sentMessages = new Map();
+
+// Fetch settings from database
+async function fetchSettings() {
+  console.log('🔄 Fetching settings from database...');
+  
+  const { data, error } = await supabase
+    .from('bot_settings')
+    .select('*')
+    .limit(1)
+    .single();
+  
+  if (error) {
+    console.error('❌ Error fetching settings:', error.message);
+    return null;
+  }
+  
+  if (!data) {
+    console.error('❌ No settings found in database!');
+    console.error('👉 Go to your app /owner page to configure settings first.');
+    return null;
+  }
+  
+  if (!data.is_active) {
+    console.log('⏸️ Bot is disabled in settings. Enable it from /owner page.');
+    return null;
+  }
+  
+  return {
+    telegram: {
+      token: data.telegram_bot_token,
+      ownerId: data.telegram_owner_id,
+    },
+    email: {
+      user: data.outlook_email,
+      password: data.outlook_password,
+      host: 'imap-mail.outlook.com',
+      port: 993,
+      tls: true,
+      tlsOptions: { rejectUnauthorized: false }
+    },
+    emailFilter: data.email_filter || '',
+    autoDeleteAfterDays: 7,
+  };
+}
+
+// Validate config
+function validateConfig(cfg) {
+  if (!cfg.telegram.token) {
+    console.error('❌ Missing: Telegram Bot Token');
+    return false;
+  }
+  if (!cfg.telegram.ownerId) {
+    console.error('❌ Missing: Telegram Owner ID');
+    return false;
+  }
+  if (!cfg.email.user) {
+    console.error('❌ Missing: Outlook Email');
+    return false;
+  }
+  if (!cfg.email.password) {
+    console.error('❌ Missing: Outlook Password/App Password');
+    return false;
+  }
+  return true;
+}
 
 // Escape MarkdownV2 special characters
 function escapeMarkdown(text) {
@@ -115,7 +164,6 @@ async function cleanupOldMessages() {
         sentMessages.delete(messageId);
         console.log(`🗑️ Deleted old message: ${messageId}`);
       } catch (error) {
-        // Message might already be deleted
         sentMessages.delete(messageId);
       }
     }
@@ -124,7 +172,7 @@ async function cleanupOldMessages() {
 
 // IMAP connection with IDLE
 function startIMAP() {
-  const imap = new Imap(config.email);
+  imap = new Imap(config.email);
   
   imap.once('ready', () => {
     console.log('📬 IMAP Connected!');
@@ -169,7 +217,6 @@ function startIMAP() {
   
   imap.once('error', (err) => {
     console.error('❌ IMAP Error:', err);
-    // Reconnect after 5 seconds
     setTimeout(startIMAP, 5000);
   });
   
@@ -179,33 +226,86 @@ function startIMAP() {
   });
   
   imap.connect();
-  
-  return imap;
 }
 
 // Telegram bot commands
-bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, `👋 Bot Email aktif!\n\n📧 Email: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua email'}\n🗑️ Auto-delete: ${config.autoDeleteAfterDays} hari\n\nCommands:\n/status - Cek status\n/myid - Lihat Chat ID`);
-});
+function setupBotCommands() {
+  bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(msg.chat.id, `👋 Bot Email aktif!\n\n📧 Email: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua email'}\n🗑️ Auto-delete: ${config.autoDeleteAfterDays} hari\n\nCommands:\n/status - Cek status\n/myid - Lihat Chat ID\n/reload - Reload settings`);
+  });
 
-bot.onText(/\/status/, (msg) => {
-  bot.sendMessage(msg.chat.id, `✅ Bot aktif!\n📧 Monitoring: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua'}\n📊 Pesan tersimpan: ${sentMessages.size}`);
-});
+  bot.onText(/\/status/, (msg) => {
+    bot.sendMessage(msg.chat.id, `✅ Bot aktif!\n📧 Monitoring: ${config.email.user}\n🔍 Filter: ${config.emailFilter || 'Semua'}\n📊 Pesan tersimpan: ${sentMessages.size}`);
+  });
 
-bot.onText(/\/myid/, (msg) => {
-  bot.sendMessage(msg.chat.id, `🆔 Chat ID kamu: \`${msg.chat.id}\``, { parse_mode: 'Markdown' });
-});
+  bot.onText(/\/myid/, (msg) => {
+    bot.sendMessage(msg.chat.id, `🆔 Chat ID kamu: \`${msg.chat.id}\``, { parse_mode: 'Markdown' });
+  });
 
-// Start
-console.log('🚀 Starting Telegram Email Bot...');
-console.log(`📧 Email: ${config.email.user}`);
-console.log(`🔍 Filter: ${config.emailFilter || 'All emails'}`);
-console.log(`👤 Owner ID: ${config.telegram.ownerId}`);
+  bot.onText(/\/reload/, async (msg) => {
+    if (msg.chat.id.toString() !== config.telegram.ownerId) {
+      return bot.sendMessage(msg.chat.id, '❌ Hanya owner yang bisa reload settings.');
+    }
+    
+    bot.sendMessage(msg.chat.id, '🔄 Reloading settings...');
+    
+    const newConfig = await fetchSettings();
+    if (newConfig && validateConfig(newConfig)) {
+      // Restart IMAP if email changed
+      if (config.email.user !== newConfig.email.user || config.email.password !== newConfig.email.password) {
+        if (imap) {
+          imap.end();
+        }
+        config = newConfig;
+        startIMAP();
+      } else {
+        config = newConfig;
+      }
+      bot.sendMessage(msg.chat.id, '✅ Settings reloaded!');
+    } else {
+      bot.sendMessage(msg.chat.id, '❌ Failed to reload settings.');
+    }
+  });
+}
 
-startIMAP();
-
-// Cleanup old messages every hour
-setInterval(cleanupOldMessages, 60 * 60 * 1000);
+// Main startup
+async function main() {
+  console.log('🚀 Starting Telegram Email Bot...');
+  console.log('📡 Fetching settings from Lovable Cloud database...');
+  
+  config = await fetchSettings();
+  
+  if (!config) {
+    console.error('\n❌ Cannot start bot!');
+    console.error('👉 Configure settings at your Lovable app: /owner');
+    console.error('👉 Make sure bot is enabled (is_active = true)');
+    process.exit(1);
+  }
+  
+  if (!validateConfig(config)) {
+    console.error('\n❌ Invalid configuration!');
+    console.error('👉 Check settings at your Lovable app: /owner');
+    process.exit(1);
+  }
+  
+  console.log(`\n✅ Settings loaded!`);
+  console.log(`📧 Email: ${config.email.user}`);
+  console.log(`🔍 Filter: ${config.emailFilter || 'All emails'}`);
+  console.log(`👤 Owner ID: ${config.telegram.ownerId}`);
+  
+  // Initialize Telegram Bot
+  bot = new TelegramBot(config.telegram.token, { polling: true });
+  setupBotCommands();
+  
+  // Start IMAP
+  startIMAP();
+  
+  // Cleanup old messages every hour
+  setInterval(cleanupOldMessages, 60 * 60 * 1000);
+  
+  console.log('\n✅ Bot is running! Press Ctrl+C to stop.');
+  console.log('💡 Use /reload command in Telegram to reload settings from database.');
+}
 
 // Keep process alive
 process.on('uncaughtException', (err) => {
@@ -216,4 +316,4 @@ process.on('unhandledRejection', (err) => {
   console.error('❌ Unhandled Rejection:', err);
 });
 
-console.log('✅ Bot is running! Press Ctrl+C to stop.');
+main();
