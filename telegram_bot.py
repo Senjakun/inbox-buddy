@@ -4,6 +4,7 @@ import logging
 import schedule
 import tempfile
 import json
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -46,22 +47,31 @@ class EmailForwarderBot:
                 logger.error("File konfigurasi tidak ditemukan!")
     
     def load_approved_users(self):
-        """Memuat daftar approved users dari file JSON"""
+        """Memuat daftar approved users dari file JSON
+        Format: {"user_id": {"expires_at": "ISO datetime" atau null untuk permanen}}
+        """
         try:
             if os.path.exists(APPROVED_USERS_FILE):
                 with open(APPROVED_USERS_FILE, 'r') as f:
                     data = json.load(f)
+                    # Konversi format lama (list) ke format baru (dict)
+                    if isinstance(data, list):
+                        new_data = {str(uid): {"expires_at": None} for uid in data}
+                        self.save_approved_users(new_data)
+                        logger.info(f"Migrated {len(new_data)} approved users to new format")
+                        return new_data
                     logger.info(f"Loaded {len(data)} approved users")
-                    return set(str(uid) for uid in data)
+                    return data
             else:
                 # Jika file tidak ada, buat dengan owner sebagai approved user pertama
                 if self.owner_id:
-                    self.save_approved_users({self.owner_id})
-                    return {self.owner_id}
-                return set()
+                    initial_data = {str(self.owner_id): {"expires_at": None}}
+                    self.save_approved_users(initial_data)
+                    return initial_data
+                return {}
         except Exception as e:
             logger.error(f"Error loading approved users: {str(e)}")
-            return set()
+            return {}
     
     def save_approved_users(self, users=None):
         """Menyimpan daftar approved users ke file JSON"""
@@ -69,7 +79,7 @@ class EmailForwarderBot:
             if users is None:
                 users = self.approved_users
             with open(APPROVED_USERS_FILE, 'w') as f:
-                json.dump(list(users), f)
+                json.dump(users, f, indent=2)
             logger.info(f"Saved {len(users)} approved users")
         except Exception as e:
             logger.error(f"Error saving approved users: {str(e)}")
@@ -79,24 +89,108 @@ class EmailForwarderBot:
         return str(user_id) == str(self.owner_id)
     
     def is_approved(self, user_id):
-        """Memeriksa apakah user sudah di-approve"""
-        return str(user_id) in self.approved_users
+        """Memeriksa apakah user sudah di-approve dan belum expired"""
+        user_id_str = str(user_id)
+        if user_id_str not in self.approved_users:
+            return False
+        
+        user_data = self.approved_users[user_id_str]
+        expires_at = user_data.get("expires_at")
+        
+        # Jika tidak ada expiry, akses permanen
+        if expires_at is None:
+            return True
+        
+        # Cek apakah sudah expired
+        try:
+            expiry_date = datetime.fromisoformat(expires_at)
+            if datetime.now() > expiry_date:
+                # Expired, hapus dari daftar
+                logger.info(f"User {user_id_str} access expired, removing...")
+                self.remove_approved_user(user_id_str)
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Error parsing expiry date: {str(e)}")
+            return True
     
-    def add_approved_user(self, user_id):
-        """Menambahkan user ke daftar approved"""
-        self.approved_users.add(str(user_id))
+    def get_active_approved_users(self):
+        """Mendapatkan daftar user yang masih aktif (belum expired)"""
+        active_users = []
+        expired_users = []
+        
+        for user_id, user_data in list(self.approved_users.items()):
+            expires_at = user_data.get("expires_at")
+            if expires_at is None:
+                active_users.append(user_id)
+            else:
+                try:
+                    expiry_date = datetime.fromisoformat(expires_at)
+                    if datetime.now() > expiry_date:
+                        expired_users.append(user_id)
+                    else:
+                        active_users.append(user_id)
+                except:
+                    active_users.append(user_id)
+        
+        # Hapus user yang expired
+        for user_id in expired_users:
+            del self.approved_users[user_id]
+            logger.info(f"Removed expired user: {user_id}")
+        
+        if expired_users:
+            self.save_approved_users()
+        
+        return active_users
+    
+    def add_approved_user(self, user_id, days=None):
+        """Menambahkan user ke daftar approved dengan opsi durasi hari"""
+        user_id_str = str(user_id)
+        
+        if days is not None and days > 0:
+            expires_at = (datetime.now() + timedelta(days=days)).isoformat()
+        else:
+            expires_at = None  # Akses permanen
+        
+        self.approved_users[user_id_str] = {"expires_at": expires_at}
         self.save_approved_users()
-        logger.info(f"User {user_id} added to approved list")
+        logger.info(f"User {user_id} added to approved list (expires: {expires_at})")
+        return expires_at
     
     def remove_approved_user(self, user_id):
         """Menghapus user dari daftar approved"""
         user_id_str = str(user_id)
         if user_id_str in self.approved_users:
-            self.approved_users.discard(user_id_str)
+            del self.approved_users[user_id_str]
             self.save_approved_users()
             logger.info(f"User {user_id} removed from approved list")
             return True
         return False
+    
+    def get_user_expiry_info(self, user_id):
+        """Mendapatkan info expiry user"""
+        user_id_str = str(user_id)
+        if user_id_str not in self.approved_users:
+            return None
+        
+        expires_at = self.approved_users[user_id_str].get("expires_at")
+        if expires_at is None:
+            return "Permanen"
+        
+        try:
+            expiry_date = datetime.fromisoformat(expires_at)
+            remaining = expiry_date - datetime.now()
+            if remaining.total_seconds() <= 0:
+                return "Expired"
+            
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            if days > 0:
+                return f"{days} hari {hours} jam lagi"
+            else:
+                return f"{hours} jam lagi"
+        except:
+            return "Unknown"
         
     async def send_message(self, chat_id, text, parse_mode=ParseMode.HTML):
         """Mengirim pesan ke chat Telegram tertentu"""
@@ -112,9 +206,11 @@ class EmailForwarderBot:
             return False
     
     async def send_to_all_approved(self, text, parse_mode=ParseMode.HTML):
-        """Mengirim pesan ke semua approved users"""
+        """Mengirim pesan ke semua approved users yang aktif"""
         success_count = 0
-        for user_id in self.approved_users:
+        active_users = self.get_active_approved_users()
+        
+        for user_id in active_users:
             try:
                 await self.bot.send_message(
                     chat_id=user_id,
@@ -153,9 +249,11 @@ class EmailForwarderBot:
             return False
     
     async def send_document_to_all_approved(self, document_data, filename, caption=None):
-        """Mengirim dokumen ke semua approved users"""
+        """Mengirim dokumen ke semua approved users yang aktif"""
         success_count = 0
-        for user_id in self.approved_users:
+        active_users = self.get_active_approved_users()
+        
+        for user_id in active_users:
             try:
                 await self.send_document(user_id, document_data, filename, caption)
                 success_count += 1
@@ -223,8 +321,9 @@ class EmailForwarderBot:
         
         logger.info(f"Ditemukan {len(emails)} email baru")
         
-        if not self.approved_users:
-            logger.warning("Tidak ada approved users untuk menerima notifikasi")
+        active_users = self.get_active_approved_users()
+        if not active_users:
+            logger.warning("Tidak ada approved users aktif untuk menerima notifikasi")
             return
         
         for email in emails:
@@ -313,7 +412,7 @@ class EmailForwarderBot:
         )
     
     async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk command /adduser <user_id> - hanya owner"""
+        """Handler untuk command /adduser <user_id> - hanya owner (akses permanen)"""
         user_id = update.effective_user.id
         
         if not self.is_owner(user_id):
@@ -324,7 +423,9 @@ class EmailForwarderBot:
             await update.message.reply_text(
                 "📝 <b>Cara penggunaan:</b>\n"
                 "<code>/adduser &lt;telegram_id&gt;</code>\n\n"
-                "Contoh: <code>/adduser 123456789</code>",
+                "Contoh: <code>/adduser 123456789</code>\n\n"
+                "💡 Untuk akses dengan batas waktu, gunakan:\n"
+                "<code>/addakses &lt;telegram_id&gt; &lt;hari&gt;</code>",
                 parse_mode=ParseMode.HTML
             )
             return
@@ -332,12 +433,56 @@ class EmailForwarderBot:
         target_id = context.args[0]
         
         if self.is_approved(target_id):
-            await update.message.reply_text(f"⚠️ User {target_id} sudah terdaftar.")
+            expiry = self.get_user_expiry_info(target_id)
+            await update.message.reply_text(f"⚠️ User {target_id} sudah terdaftar (Akses: {expiry}).")
             return
         
-        self.add_approved_user(target_id)
+        self.add_approved_user(target_id)  # Tanpa durasi = permanen
         await update.message.reply_text(
-            f"✅ User <code>{target_id}</code> berhasil ditambahkan ke daftar approved.",
+            f"✅ User <code>{target_id}</code> berhasil ditambahkan dengan akses <b>PERMANEN</b>.",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_addakses(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /addakses <user_id> <hari> - hanya owner (akses dengan durasi)"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat menambahkan akses.")
+            return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/addakses &lt;telegram_id&gt; &lt;hari&gt;</code>\n\n"
+                "Contoh:\n"
+                "• <code>/addakses 123456789 7</code> → 7 hari\n"
+                "• <code>/addakses 123456789 30</code> → 30 hari\n\n"
+                "💡 Untuk akses permanen, gunakan:\n"
+                "<code>/adduser &lt;telegram_id&gt;</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        target_id = context.args[0]
+        
+        try:
+            days = int(context.args[1])
+            if days <= 0:
+                await update.message.reply_text("⚠️ Jumlah hari harus lebih dari 0.")
+                return
+        except ValueError:
+            await update.message.reply_text("⚠️ Jumlah hari harus berupa angka.")
+            return
+        
+        # Jika user sudah ada, update durasinya
+        expires_at = self.add_approved_user(target_id, days=days)
+        expiry_date = datetime.fromisoformat(expires_at)
+        
+        await update.message.reply_text(
+            f"✅ User <code>{target_id}</code> berhasil ditambahkan.\n\n"
+            f"⏱ <b>Durasi:</b> {days} hari\n"
+            f"📅 <b>Berlaku hingga:</b> {expiry_date.strftime('%d %B %Y, %H:%M')}",
             parse_mode=ParseMode.HTML
         )
     
@@ -384,9 +529,56 @@ class EmailForwarderBot:
             await update.message.reply_text("📋 Tidak ada approved users.")
             return
         
-        user_list = "\n".join([f"• <code>{uid}</code>" + (" 👑" if uid == str(self.owner_id) else "") for uid in self.approved_users])
+        # Bersihkan user yang expired terlebih dahulu
+        self.get_active_approved_users()
+        
+        user_lines = []
+        for uid in self.approved_users:
+            expiry_info = self.get_user_expiry_info(uid)
+            is_owner = " 👑" if uid == str(self.owner_id) else ""
+            user_lines.append(f"• <code>{uid}</code>{is_owner}\n   ⏱ {expiry_info}")
+        
+        user_list = "\n".join(user_lines)
         await update.message.reply_text(
             f"📋 <b>Daftar Approved Users ({len(self.approved_users)}):</b>\n\n{user_list}\n\n👑 = Owner",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_broadcast(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /broadcast <pesan> - hanya owner"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat mengirim broadcast.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/broadcast &lt;pesan&gt;</code>\n\n"
+                "Contoh: <code>/broadcast Halo semua! Ada update penting.</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        # Gabungkan semua argumen menjadi satu pesan
+        message_text = " ".join(context.args)
+        
+        # Kirim konfirmasi
+        await update.message.reply_text("📤 Mengirim broadcast...")
+        
+        # Format pesan broadcast
+        broadcast_message = (
+            f"📢 <b>BROADCAST dari Admin</b>\n\n"
+            f"{self.escape_html(message_text)}"
+        )
+        
+        # Kirim ke semua approved users
+        success_count = await self.send_to_all_approved(broadcast_message)
+        active_users = len(self.get_active_approved_users())
+        
+        await update.message.reply_text(
+            f"✅ Broadcast terkirim ke {success_count}/{active_users} users.",
             parse_mode=ParseMode.HTML
         )
     
@@ -424,9 +616,11 @@ class EmailForwarderBot:
         if self.is_owner(user_id):
             help_text += (
                 "\n<b>🔐 Perintah Owner:</b>\n"
-                "/adduser &lt;id&gt; - Tambah approved user\n"
+                "/adduser &lt;id&gt; - Tambah user (permanen)\n"
+                "/addakses &lt;id&gt; &lt;hari&gt; - Tambah user dengan durasi\n"
                 "/removeuser &lt;id&gt; - Hapus approved user\n"
                 "/listusers - Lihat daftar approved users\n"
+                "/broadcast &lt;pesan&gt; - Kirim pesan ke semua users\n"
             )
         
         await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
@@ -444,9 +638,11 @@ class EmailForwarderBot:
         app.add_handler(CommandHandler("start", self.cmd_start))
         app.add_handler(CommandHandler("myid", self.cmd_myid))
         app.add_handler(CommandHandler("adduser", self.cmd_adduser))
+        app.add_handler(CommandHandler("addakses", self.cmd_addakses))
         app.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
         app.add_handler(CommandHandler("listusers", self.cmd_listusers))
         app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
         app.add_handler(CommandHandler("help", self.cmd_help))
         
         # Jadwalkan pemeriksaan email berkala menggunakan job queue
