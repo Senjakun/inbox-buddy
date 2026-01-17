@@ -1,6 +1,7 @@
 import imaplib
 import email
 import os
+import json
 from email.header import decode_header
 from dotenv import load_dotenv
 import logging
@@ -16,26 +17,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# File untuk menyimpan settings
+SETTINGS_FILE = 'bot_settings.json'
+
+def load_settings():
+    """Memuat settings dari file JSON"""
+    default_settings = {
+        "email_host": "imap.gmail.com",
+        "email_port": 993,
+        "email_username": "",
+        "email_password": "",
+        "email_folder": "INBOX",
+        "filter_sender": "support@info.airwallex.com",
+        "filter_subject": "Your one-time passcode is",
+        "check_interval": 2
+    }
+    
+    try:
+        if os.path.exists(SETTINGS_FILE):
+            with open(SETTINGS_FILE, 'r') as f:
+                saved = json.load(f)
+                # Merge dengan default untuk field yang mungkin belum ada
+                default_settings.update(saved)
+        else:
+            # Buat file settings baru
+            save_settings(default_settings)
+    except Exception as e:
+        logger.error(f"Error loading settings: {str(e)}")
+    
+    return default_settings
+
+def save_settings(settings):
+    """Menyimpan settings ke file JSON"""
+    try:
+        with open(SETTINGS_FILE, 'w') as f:
+            json.dump(settings, f, indent=2)
+        logger.info("Settings saved successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving settings: {str(e)}")
+        return False
+
 class EmailReader:
     def __init__(self):
-        # Memuat variabel lingkungan
-        load_dotenv('config.env')
-        
-        self.host = os.getenv('EMAIL_HOST')
-        self.port = int(os.getenv('EMAIL_PORT', 993))
-        self.username = os.getenv('EMAIL_USERNAME')
-        self.password = os.getenv('EMAIL_APP_PASSWORD')  # Menggunakan sandi aplikasi
-        self.folder = os.getenv('EMAIL_FOLDER', 'INBOX')
-        
-        # Filter email dari konfigurasi
-        self.filter_sender = os.getenv('EMAIL_FILTER_SENDER', 'support@info.airwallex.com')
-        self.filter_subject = os.getenv('EMAIL_FILTER_SUBJECT', 'Your one-time passcode is')
+        # Memuat settings dari file JSON
+        self.settings = load_settings()
+        self.reload_settings()
         
         # Menyimpan ID email yang sudah diproses
         self.processed_emails = set()
+    
+    def reload_settings(self):
+        """Reload settings dari file"""
+        self.settings = load_settings()
+        
+        self.host = self.settings.get('email_host', 'imap.gmail.com')
+        self.port = int(self.settings.get('email_port', 993))
+        self.username = self.settings.get('email_username', '')
+        self.password = self.settings.get('email_password', '')
+        self.folder = self.settings.get('email_folder', 'INBOX')
+        
+        # Filter email dari settings
+        self.filter_sender = self.settings.get('filter_sender', 'support@info.airwallex.com')
+        self.filter_subject = self.settings.get('filter_subject', 'Your one-time passcode is')
+        
+        logger.info(f"Settings reloaded - Host: {self.host}, Username: {self.username}")
+    
+    def is_configured(self):
+        """Memeriksa apakah email sudah dikonfigurasi"""
+        return bool(self.username and self.password and self.host)
         
     def connect(self):
         """Menghubungkan ke server email"""
+        if not self.is_configured():
+            logger.warning("Email belum dikonfigurasi. Gunakan /set email di Telegram.")
+            return False
+            
         try:
             self.mail = imaplib.IMAP4_SSL(self.host, self.port)
             self.mail.login(self.username, self.password)
@@ -161,13 +218,21 @@ class EmailReader:
     
     def should_process_email(self, from_email, subject):
         """Memeriksa apakah email harus diproses berdasarkan filter"""
-        # Periksa apakah pengirim dan subjek sesuai dengan filter
-        if self.filter_sender in from_email and self.filter_subject in subject:
+        # Jika filter kosong, proses semua email
+        if not self.filter_sender and not self.filter_subject:
             return True
-        return False
+        
+        # Periksa apakah pengirim dan subjek sesuai dengan filter
+        sender_match = not self.filter_sender or self.filter_sender.lower() in from_email.lower()
+        subject_match = not self.filter_subject or self.filter_subject.lower() in subject.lower()
+        
+        return sender_match and subject_match
     
     def get_new_emails(self):
         """Mengambil email baru yang belum diproses"""
+        # Reload settings sebelum cek email
+        self.reload_settings()
+        
         if not self.connect():
             return []
         

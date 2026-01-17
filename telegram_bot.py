@@ -9,10 +9,10 @@ import string
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
-from email_reader import EmailReader
+from email_reader import EmailReader, load_settings, save_settings, SETTINGS_FILE
 
 # Konfigurasi logging
 logging.basicConfig(
@@ -28,14 +28,21 @@ NOTIFIED_USERS_FILE = 'notified_expiry.json'
 # File untuk menyimpan kode redeem
 REDEEM_CODES_FILE = 'redeem_codes.json'
 
+# States untuk conversation handler
+(SET_EMAIL_HOST, SET_EMAIL_USER, SET_EMAIL_PASS, 
+ SET_FILTER_SENDER, SET_FILTER_SUBJECT, SET_INTERVAL) = range(6)
+
 class EmailForwarderBot:
     def __init__(self):
         # Memuat variabel lingkungan
         load_dotenv('config.env')
         
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.owner_id = os.getenv('TELEGRAM_OWNER_ID')  # ID pemilik bot
-        self.check_interval = int(os.getenv('CHECK_INTERVAL', 300))  # Default 5 menit
+        self.owner_id = os.getenv('TELEGRAM_OWNER_ID')
+        
+        # Load settings dari file JSON
+        self.settings = load_settings()
+        self.check_interval = int(self.settings.get('check_interval', 2))
         
         # Inisialisasi bot Telegram dan pembaca email
         self.bot = Bot(token=self.bot_token)
@@ -58,15 +65,19 @@ class EmailForwarderBot:
             else:
                 logger.error("File konfigurasi tidak ditemukan!")
     
+    def reload_settings(self):
+        """Reload settings dari file"""
+        self.settings = load_settings()
+        self.check_interval = int(self.settings.get('check_interval', 2))
+        self.email_reader.reload_settings()
+        logger.info("Bot settings reloaded")
+    
     def load_approved_users(self):
-        """Memuat daftar approved users dari file JSON
-        Format: {"user_id": {"expires_at": "ISO datetime" atau null untuk permanen}}
-        """
+        """Memuat daftar approved users dari file JSON"""
         try:
             if os.path.exists(APPROVED_USERS_FILE):
                 with open(APPROVED_USERS_FILE, 'r') as f:
                     data = json.load(f)
-                    # Konversi format lama (list) ke format baru (dict)
                     if isinstance(data, list):
                         new_data = {str(uid): {"expires_at": None} for uid in data}
                         self.save_approved_users(new_data)
@@ -75,7 +86,6 @@ class EmailForwarderBot:
                     logger.info(f"Loaded {len(data)} approved users")
                     return data
             else:
-                # Jika file tidak ada, buat dengan owner sebagai approved user pertama
                 if self.owner_id:
                     initial_data = {str(self.owner_id): {"expires_at": None}}
                     self.save_approved_users(initial_data)
@@ -109,15 +119,12 @@ class EmailForwarderBot:
         user_data = self.approved_users[user_id_str]
         expires_at = user_data.get("expires_at")
         
-        # Jika tidak ada expiry, akses permanen
         if expires_at is None:
             return True
         
-        # Cek apakah sudah expired
         try:
             expiry_date = datetime.fromisoformat(expires_at)
             if datetime.now() > expiry_date:
-                # Expired, hapus dari daftar
                 logger.info(f"User {user_id_str} access expired, removing...")
                 self.remove_approved_user(user_id_str)
                 return False
@@ -172,7 +179,6 @@ class EmailForwarderBot:
         characters = string.ascii_uppercase + string.digits
         while True:
             code = ''.join(random.choices(characters, k=length))
-            # Pastikan kode belum digunakan
             if code not in self.redeem_codes:
                 return code
     
@@ -200,7 +206,6 @@ class EmailForwarderBot:
         if code_data["used"]:
             return None, "Kode sudah pernah digunakan."
         
-        # Tandai kode sudah digunakan
         days = code_data["days"]
         self.redeem_codes[code]["used"] = True
         self.redeem_codes[code]["used_by"] = str(user_id)
@@ -228,10 +233,8 @@ class EmailForwarderBot:
                 except:
                     active_users.append(user_id)
         
-        # Hapus user yang expired
         for user_id in expired_users:
             del self.approved_users[user_id]
-            # Hapus juga dari notified tracking
             if user_id in self.notified_expiry:
                 del self.notified_expiry[user_id]
             logger.info(f"Removed expired user: {user_id}")
@@ -243,30 +246,24 @@ class EmailForwarderBot:
         return active_users, expired_users
     
     async def check_and_notify_expiring_users(self):
-        """Memeriksa dan mengirim notifikasi ke user yang sudah expired (hanya 1x)"""
+        """Memeriksa dan mengirim notifikasi ke user yang sudah expired"""
         now = datetime.now()
         users_expired = []
         
         for user_id, user_data in list(self.approved_users.items()):
             expires_at = user_data.get("expires_at")
             if expires_at is None:
-                continue  # Skip permanent users
+                continue
             
             try:
                 expiry_date = datetime.fromisoformat(expires_at)
-                
-                # Jika sudah expired
                 if now > expiry_date:
                     users_expired.append(user_id)
-                        
             except Exception as e:
                 logger.error(f"Error checking expiry for user {user_id}: {str(e)}")
         
-        # Kirim notifikasi ke user yang sudah expired dan hapus dari daftar
         for user_id in users_expired:
-            # Cek apakah sudah pernah dinotifikasi (hindari spam)
             if user_id in self.notified_expiry:
-                # Sudah dinotifikasi, langsung hapus saja
                 if user_id in self.approved_users:
                     del self.approved_users[user_id]
                 del self.notified_expiry[user_id]
@@ -284,11 +281,9 @@ class EmailForwarderBot:
             except Exception as e:
                 logger.error(f"Failed to send expiry notification to {user_id}: {str(e)}")
             
-            # Hapus dari approved users
             if user_id in self.approved_users:
                 del self.approved_users[user_id]
             
-            # Notifikasi ke owner
             if self.owner_id:
                 owner_msg = f"📢 User <code>{user_id}</code> akses telah berakhir dan dihapus dari daftar."
                 try:
@@ -307,7 +302,7 @@ class EmailForwarderBot:
         if days is not None and days > 0:
             expires_at = (datetime.now() + timedelta(days=days)).isoformat()
         else:
-            expires_at = None  # Akses permanen
+            expires_at = None
         
         self.approved_users[user_id_str] = {"expires_at": expires_at}
         self.save_approved_users()
@@ -386,7 +381,6 @@ class EmailForwarderBot:
                 temp_file.write(document_data)
                 temp_file_path = temp_file.name
             
-            # Escape HTML dalam caption jika ada
             if caption:
                 caption = self.escape_html(caption)
             
@@ -398,7 +392,6 @@ class EmailForwarderBot:
                     caption=caption
                 )
             
-            # Hapus file sementara
             os.unlink(temp_file_path)
             return True
         except Exception as e:
@@ -428,7 +421,6 @@ class EmailForwarderBot:
         """Format email menjadi pesan Telegram"""
         message = f"<b>📧 Email Baru</b>\n\n"
         
-        # Escape karakter HTML dalam data email
         from_email = self.escape_html(email['from'])
         subject = self.escape_html(email['subject'])
         
@@ -436,32 +428,24 @@ class EmailForwarderBot:
         message += f"<b>Subjek:</b> {subject}\n"
         message += f"<b>Tanggal:</b> {email['date'].strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         
-        # Tambahkan kode OTP jika ditemukan
         if 'otp_code' in email and email['otp_code']:
             message += f"<b>🔑 OTP CODE:</b> <code>{email['otp_code']}</code>\n\n"
         
-        # Tambahkan isi email lengkap
         if 'full_content' in email and email['full_content']:
-            # Batasi panjang pesan
             full_content = email['full_content']
             if len(full_content) > 3800:
                 full_content = full_content[:3800] + "...\n[Pesan terpotong karena terlalu panjang]"
             
-            # Escape HTML dalam isi email
             full_content = self.escape_html(full_content)
             message += f"<b>Isi Email Lengkap:</b>\n\n{full_content}\n\n"
-        # Fallback ke body_text jika full_content tidak tersedia
         elif email['body_text']:
-            # Batasi panjang pesan
             body_text = email['body_text']
             if len(body_text) > 3800:
                 body_text = body_text[:3800] + "...\n[Pesan terpotong karena terlalu panjang]"
             
-            # Escape HTML dalam isi email
             body_text = self.escape_html(body_text)
             message += f"<b>Isi Email:</b>\n\n{body_text}\n\n"
         
-        # Informasi tentang lampiran
         if email['attachments']:
             message += f"<b>Lampiran:</b> {len(email['attachments'])} file\n"
         
@@ -470,6 +454,12 @@ class EmailForwarderBot:
     async def process_new_emails(self):
         """Memproses email baru dan mengirimkannya ke semua approved users"""
         logger.info("Memeriksa email baru...")
+        
+        # Cek apakah email sudah dikonfigurasi
+        if not self.email_reader.is_configured():
+            logger.warning("Email belum dikonfigurasi. Skip pengecekan.")
+            return
+        
         emails = self.email_reader.get_new_emails()
         
         if not emails:
@@ -485,11 +475,9 @@ class EmailForwarderBot:
         
         for email in emails:
             try:
-                # Format dan kirim pesan ke semua approved users
                 message = await self.format_email_message(email)
                 success = await self.send_to_all_approved(message)
                 
-                # Jika gagal dengan format HTML, coba kirim tanpa format
                 if success == 0:
                     logger.info("Mencoba mengirim pesan tanpa format HTML...")
                     plain_message = f"📧 Email Baru\n\n"
@@ -497,17 +485,14 @@ class EmailForwarderBot:
                     plain_message += f"Subjek: {email['subject']}\n"
                     plain_message += f"Tanggal: {email['date'].strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                     
-                    # Tambahkan kode OTP jika ditemukan
                     if 'otp_code' in email and email['otp_code']:
                         plain_message += f"🔑 OTP CODE: {email['otp_code']}\n\n"
                     
-                    # Tambahkan isi email lengkap
                     if 'full_content' in email and email['full_content']:
                         full_content = email['full_content']
                         if len(full_content) > 3800:
                             full_content = full_content[:3800] + "...\n[Pesan terpotong karena terlalu panjang]"
                         plain_message += f"Isi Email Lengkap:\n\n{full_content}\n\n"
-                    # Fallback ke body_text jika full_content tidak tersedia
                     elif email['body_text']:
                         body_text = email['body_text']
                         if len(body_text) > 3800:
@@ -519,7 +504,6 @@ class EmailForwarderBot:
                     
                     await self.send_to_all_approved(plain_message, parse_mode=None)
                 
-                # Kirim lampiran jika ada ke semua approved users
                 for attachment in email['attachments']:
                     await self.send_document_to_all_approved(
                         attachment['data'],
@@ -568,6 +552,326 @@ class EmailForwarderBot:
             parse_mode=ParseMode.HTML
         )
     
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /help"""
+        user_id = update.effective_user.id
+        
+        help_text = (
+            "📚 <b>Daftar Perintah</b>\n\n"
+            "<b>Umum:</b>\n"
+            "/start - Memulai bot\n"
+            "/myid - Lihat ID Telegram Anda\n"
+            "/status - Lihat status bot\n"
+            "/help - Tampilkan bantuan ini\n"
+            "/redeem &lt;kode&gt; - Gunakan kode akses\n\n"
+        )
+        
+        if self.is_owner(user_id):
+            help_text += (
+                "<b>⚙️ Pengaturan (Owner):</b>\n"
+                "/set - Menu pengaturan\n"
+                "/settings - Lihat semua pengaturan\n"
+                "/testemail - Tes koneksi email\n\n"
+                "<b>👥 Manajemen User (Owner):</b>\n"
+                "/adduser &lt;id&gt; - Tambah user permanen\n"
+                "/addakses &lt;id&gt; &lt;hari&gt; - Tambah akses sementara\n"
+                "/removeuser &lt;id&gt; - Hapus user\n"
+                "/listusers - Daftar user\n"
+                "/broadcast &lt;pesan&gt; - Kirim pesan ke semua\n\n"
+                "<b>🎫 Kode Redeem (Owner):</b>\n"
+                "/kodeunik &lt;hari&gt; - Buat kode redeem\n"
+                "/listkode - Daftar kode\n"
+                "/hapuskode &lt;kode&gt; - Hapus kode\n"
+            )
+        
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
+    
+    async def cmd_set(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /set - menu pengaturan"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat mengubah pengaturan.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "⚙️ <b>Menu Pengaturan</b>\n\n"
+                "Gunakan perintah berikut:\n\n"
+                "<b>📧 Email:</b>\n"
+                "<code>/set email</code> - Atur konfigurasi email\n"
+                "<code>/set host &lt;host&gt;</code> - Atur IMAP host\n"
+                "<code>/set user &lt;email&gt;</code> - Atur email username\n"
+                "<code>/set pass &lt;password&gt;</code> - Atur app password\n\n"
+                "<b>🔍 Filter:</b>\n"
+                "<code>/set sender &lt;email&gt;</code> - Filter pengirim\n"
+                "<code>/set subject &lt;text&gt;</code> - Filter subjek\n"
+                "<code>/set nofilter</code> - Hapus semua filter\n\n"
+                "<b>⏱ Interval:</b>\n"
+                "<code>/set interval &lt;detik&gt;</code> - Interval cek email\n\n"
+                "<b>📋 Lihat Pengaturan:</b>\n"
+                "<code>/settings</code> - Lihat semua pengaturan",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        action = context.args[0].lower()
+        
+        if action == "email":
+            await update.message.reply_text(
+                "📧 <b>Konfigurasi Email</b>\n\n"
+                "Untuk mengatur email, gunakan perintah berikut:\n\n"
+                "1️⃣ <code>/set host imap.gmail.com</code>\n"
+                "2️⃣ <code>/set user email@gmail.com</code>\n"
+                "3️⃣ <code>/set pass your_app_password</code>\n\n"
+                "💡 <b>Catatan:</b>\n"
+                "• Gmail: gunakan App Password\n"
+                "• Outlook: gunakan imap-mail.outlook.com",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif action == "host":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set host &lt;imap_host&gt;</code>\n\n"
+                    "Contoh:\n"
+                    "• Gmail: <code>/set host imap.gmail.com</code>\n"
+                    "• Outlook: <code>/set host imap-mail.outlook.com</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            new_host = context.args[1]
+            self.settings['email_host'] = new_host
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            await update.message.reply_text(
+                f"✅ Email host berhasil diubah ke:\n<code>{new_host}</code>",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif action == "user":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set user &lt;email&gt;</code>\n\n"
+                    "Contoh: <code>/set user myemail@gmail.com</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            new_user = context.args[1]
+            self.settings['email_username'] = new_user
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            await update.message.reply_text(
+                f"✅ Email username berhasil diubah ke:\n<code>{new_user}</code>",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif action == "pass":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set pass &lt;app_password&gt;</code>\n\n"
+                    "Contoh: <code>/set pass abcd efgh ijkl mnop</code>\n\n"
+                    "💡 Untuk Gmail, buat App Password di:\n"
+                    "Google Account → Security → 2-Step Verification → App Passwords",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            # Gabungkan semua args setelah 'pass' (untuk password dengan spasi)
+            new_pass = ' '.join(context.args[1:])
+            self.settings['email_password'] = new_pass
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            await update.message.reply_text(
+                f"✅ Email password berhasil diubah.\n\n"
+                f"⚠️ Password disimpan dengan aman di server.",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif action == "sender":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set sender &lt;email_pengirim&gt;</code>\n\n"
+                    "Contoh: <code>/set sender support@airwallex.com</code>\n\n"
+                    "💡 Kosongkan untuk menerima dari semua pengirim:\n"
+                    "<code>/set sender none</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            new_sender = context.args[1] if context.args[1].lower() != 'none' else ''
+            self.settings['filter_sender'] = new_sender
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            if new_sender:
+                await update.message.reply_text(
+                    f"✅ Filter sender berhasil diubah ke:\n<code>{new_sender}</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await update.message.reply_text("✅ Filter sender dihapus. Menerima dari semua pengirim.")
+        
+        elif action == "subject":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set subject &lt;teks_subjek&gt;</code>\n\n"
+                    "Contoh: <code>/set subject Your one-time passcode</code>\n\n"
+                    "💡 Kosongkan untuk menerima semua subjek:\n"
+                    "<code>/set subject none</code>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            new_subject = ' '.join(context.args[1:]) if context.args[1].lower() != 'none' else ''
+            self.settings['filter_subject'] = new_subject
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            if new_subject:
+                await update.message.reply_text(
+                    f"✅ Filter subject berhasil diubah ke:\n<code>{new_subject}</code>",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await update.message.reply_text("✅ Filter subject dihapus. Menerima semua subjek.")
+        
+        elif action == "nofilter":
+            self.settings['filter_sender'] = ''
+            self.settings['filter_subject'] = ''
+            save_settings(self.settings)
+            self.email_reader.reload_settings()
+            
+            await update.message.reply_text(
+                "✅ Semua filter dihapus.\n\n"
+                "Bot akan meneruskan <b>semua</b> email yang masuk.",
+                parse_mode=ParseMode.HTML
+            )
+        
+        elif action == "interval":
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "📝 <b>Format:</b> <code>/set interval &lt;detik&gt;</code>\n\n"
+                    "Contoh:\n"
+                    "• <code>/set interval 2</code> → Cek setiap 2 detik\n"
+                    "• <code>/set interval 60</code> → Cek setiap 1 menit\n"
+                    "• <code>/set interval 300</code> → Cek setiap 5 menit",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+            
+            try:
+                new_interval = int(context.args[1])
+                if new_interval < 1:
+                    await update.message.reply_text("⚠️ Interval minimal 1 detik.")
+                    return
+                
+                self.settings['check_interval'] = new_interval
+                save_settings(self.settings)
+                self.check_interval = new_interval
+                
+                await update.message.reply_text(
+                    f"✅ Interval cek email diubah ke:\n<b>{new_interval} detik</b>",
+                    parse_mode=ParseMode.HTML
+                )
+            except ValueError:
+                await update.message.reply_text("⚠️ Interval harus berupa angka.")
+        
+        else:
+            await update.message.reply_text(
+                f"⚠️ Perintah tidak dikenal: <code>{action}</code>\n\n"
+                f"Gunakan <code>/set</code> untuk melihat menu pengaturan.",
+                parse_mode=ParseMode.HTML
+            )
+    
+    async def cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /settings - lihat semua pengaturan"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat melihat pengaturan.")
+            return
+        
+        settings = load_settings()
+        
+        # Mask password
+        password_display = "****" if settings.get('email_password') else "(belum diatur)"
+        username_display = settings.get('email_username') or "(belum diatur)"
+        
+        # Status konfigurasi
+        email_configured = bool(settings.get('email_username') and settings.get('email_password'))
+        status_emoji = "✅" if email_configured else "⚠️"
+        
+        await update.message.reply_text(
+            f"⚙️ <b>Pengaturan Bot</b>\n\n"
+            f"<b>📧 Email:</b>\n"
+            f"• Host: <code>{settings.get('email_host', 'imap.gmail.com')}</code>\n"
+            f"• Port: <code>{settings.get('email_port', 993)}</code>\n"
+            f"• Username: <code>{username_display}</code>\n"
+            f"• Password: <code>{password_display}</code>\n"
+            f"• Folder: <code>{settings.get('email_folder', 'INBOX')}</code>\n\n"
+            f"<b>🔍 Filter:</b>\n"
+            f"• Sender: <code>{settings.get('filter_sender') or '(semua)'}</code>\n"
+            f"• Subject: <code>{settings.get('filter_subject') or '(semua)'}</code>\n\n"
+            f"<b>⏱ Interval:</b> {settings.get('check_interval', 2)} detik\n\n"
+            f"<b>Status:</b> {status_emoji} {'Terkonfigurasi' if email_configured else 'Belum lengkap'}",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_testemail(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /testemail - tes koneksi email"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat melakukan tes email.")
+            return
+        
+        await update.message.reply_text("🔄 Menguji koneksi email...")
+        
+        self.email_reader.reload_settings()
+        
+        if not self.email_reader.is_configured():
+            await update.message.reply_text(
+                "⚠️ Email belum dikonfigurasi!\n\n"
+                "Gunakan perintah berikut:\n"
+                "<code>/set host imap.gmail.com</code>\n"
+                "<code>/set user email@gmail.com</code>\n"
+                "<code>/set pass your_app_password</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        try:
+            if self.email_reader.connect():
+                self.email_reader.disconnect()
+                await update.message.reply_text(
+                    "✅ <b>Koneksi Berhasil!</b>\n\n"
+                    f"📧 Host: {self.email_reader.host}\n"
+                    f"👤 User: {self.email_reader.username}\n"
+                    f"📁 Folder: {self.email_reader.folder}",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ <b>Koneksi Gagal!</b>\n\n"
+                    "Periksa kembali:\n"
+                    "• Email host\n"
+                    "• Username\n"
+                    "• App Password\n\n"
+                    "💡 Untuk Gmail, pastikan menggunakan App Password.",
+                    parse_mode=ParseMode.HTML
+                )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ <b>Error:</b>\n<code>{str(e)}</code>",
+                parse_mode=ParseMode.HTML
+            )
+    
     async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /adduser <user_id> - hanya owner (akses permanen)"""
         user_id = update.effective_user.id
@@ -594,7 +898,7 @@ class EmailForwarderBot:
             await update.message.reply_text(f"⚠️ User {target_id} sudah terdaftar (Akses: {expiry}).")
             return
         
-        self.add_approved_user(target_id)  # Tanpa durasi = permanen
+        self.add_approved_user(target_id)
         await update.message.reply_text(
             f"✅ User <code>{target_id}</code> berhasil ditambahkan dengan akses <b>PERMANEN</b>.",
             parse_mode=ParseMode.HTML
@@ -632,7 +936,6 @@ class EmailForwarderBot:
             await update.message.reply_text("⚠️ Jumlah hari harus berupa angka.")
             return
         
-        # Jika user sudah ada, update durasinya
         expires_at = self.add_approved_user(target_id, days=days)
         expiry_date = datetime.fromisoformat(expires_at)
         
@@ -686,7 +989,6 @@ class EmailForwarderBot:
             await update.message.reply_text("📋 Tidak ada approved users.")
             return
         
-        # Bersihkan user yang expired terlebih dahulu
         self.get_active_approved_users()
         
         user_lines = []
@@ -718,19 +1020,15 @@ class EmailForwarderBot:
             )
             return
         
-        # Gabungkan semua argumen menjadi satu pesan
         message_text = " ".join(context.args)
         
-        # Kirim konfirmasi
         await update.message.reply_text("📤 Mengirim broadcast...")
         
-        # Format pesan broadcast
         broadcast_message = (
             f"📢 <b>BROADCAST dari Admin</b>\n\n"
             f"{self.escape_html(message_text)}"
         )
         
-        # Kirim ke semua approved users
         success_count = await self.send_to_all_approved(broadcast_message)
         active_users, _ = self.get_active_approved_users()
         
@@ -747,12 +1045,14 @@ class EmailForwarderBot:
             await update.message.reply_text("❌ Anda tidak memiliki akses ke perintah ini.")
             return
         
+        email_configured = self.email_reader.is_configured()
+        
         status_msg = (
             f"📊 <b>Status Bot</b>\n\n"
-            f"✅ Bot aktif\n"
+            f"{'✅' if email_configured else '⚠️'} Bot {'aktif' if email_configured else 'belum dikonfigurasi'}\n"
             f"⏱ Interval cek: {self.check_interval} detik\n"
             f"👥 Approved users: {len(self.approved_users)}\n"
-            f"📧 Email host: {self.email_reader.host}\n"
+            f"📧 Email host: {self.email_reader.host or '(belum diatur)'}\n"
             f"📬 Folder: {self.email_reader.folder}"
         )
         
@@ -784,7 +1084,6 @@ class EmailForwarderBot:
             await update.message.reply_text("⚠️ Jumlah hari harus berupa angka.")
             return
         
-        # Generate kode unik
         code = self.create_redeem_code(days)
         
         await update.message.reply_text(
@@ -823,11 +1122,46 @@ class EmailForwarderBot:
             message += f"<b>🟢 Kode Aktif ({len(active_codes)}):</b>\n" + "\n".join(active_codes) + "\n\n"
         
         if used_codes:
-            message += f"<b>✅ Kode Terpakai ({len(used_codes)}):</b>\n" + "\n".join(used_codes[-10:])  # Tampilkan 10 terakhir
+            message += f"<b>✅ Kode Terpakai ({len(used_codes)}):</b>\n" + "\n".join(used_codes[-10:])
             if len(used_codes) > 10:
                 message += f"\n... dan {len(used_codes) - 10} lainnya"
         
         await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    
+    async def cmd_hapuskode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /hapuskode <kode> - hanya owner, hapus kode yang belum terpakai"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat menghapus kode.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/hapuskode &lt;kode&gt;</code>\n\n"
+                "Contoh: <code>/hapuskode ABC123</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        code = context.args[0].upper()
+        
+        if code not in self.redeem_codes:
+            await update.message.reply_text(f"⚠️ Kode <code>{code}</code> tidak ditemukan.", parse_mode=ParseMode.HTML)
+            return
+        
+        if self.redeem_codes[code]["used"]:
+            await update.message.reply_text(f"⚠️ Kode <code>{code}</code> sudah terpakai, tidak dapat dihapus.", parse_mode=ParseMode.HTML)
+            return
+        
+        del self.redeem_codes[code]
+        self.save_redeem_codes()
+        
+        await update.message.reply_text(
+            f"✅ Kode <code>{code}</code> berhasil dihapus.",
+            parse_mode=ParseMode.HTML
+        )
     
     async def cmd_redeem(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /redeem <kode> - untuk user redeem kode"""
@@ -844,7 +1178,6 @@ class EmailForwarderBot:
         
         code = context.args[0].upper()
         
-        # Cek apakah user sudah punya akses
         if self.is_approved(user_id):
             user_data = self.approved_users.get(str(user_id), {})
             expires_at = user_data.get("expires_at")
@@ -852,14 +1185,12 @@ class EmailForwarderBot:
                 await update.message.reply_text("✅ Anda sudah memiliki akses permanen!")
                 return
         
-        # Gunakan kode
         days, error = self.use_redeem_code(code, user_id)
         
         if error:
             await update.message.reply_text(f"❌ {error}")
             return
         
-        # Tambahkan akses ke user
         expires_at = self.add_approved_user(user_id, days=days)
         expiry_date = datetime.fromisoformat(expires_at)
         
@@ -867,16 +1198,16 @@ class EmailForwarderBot:
             f"🎉 <b>Kode Berhasil Digunakan!</b>\n\n"
             f"✅ Anda sekarang memiliki akses selama <b>{days} hari</b>.\n"
             f"📅 Berlaku hingga: {expiry_date.strftime('%d %B %Y, %H:%M')}\n\n"
-            f"Anda akan menerima notifikasi email dari bot ini.",
+            f"Anda akan menerima notifikasi email secara otomatis.",
             parse_mode=ParseMode.HTML
         )
         
-        # Notifikasi ke owner
         if self.owner_id:
+            username = update.effective_user.username or "Unknown"
             owner_msg = (
-                f"📢 <b>Kode Digunakan!</b>\n\n"
-                f"👤 User: <code>{user_id}</code>\n"
-                f"🎫 Kode: <code>{code}</code>\n"
+                f"📢 <b>Kode Redeem Digunakan!</b>\n\n"
+                f"👤 User: @{username} (<code>{user_id}</code>)\n"
+                f"📋 Kode: <code>{code}</code>\n"
                 f"⏱ Durasi: {days} hari"
             )
             try:
@@ -884,83 +1215,72 @@ class EmailForwarderBot:
             except:
                 pass
     
-    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler untuk command /help"""
-        user_id = update.effective_user.id
-        
-        help_text = (
-            "📖 <b>Daftar Perintah</b>\n\n"
-            "/start - Mulai bot\n"
-            "/myid - Lihat ID Telegram Anda\n"
-            "/redeem &lt;kode&gt; - Gunakan kode akses\n"
-            "/status - Cek status bot\n"
-            "/help - Tampilkan bantuan\n"
-        )
-        
-        if self.is_owner(user_id):
-            help_text += (
-                "\n<b>🔐 Perintah Owner:</b>\n"
-                "/adduser &lt;id&gt; - Tambah user (permanen)\n"
-                "/addakses &lt;id&gt; &lt;hari&gt; - Tambah user dengan durasi\n"
-                "/removeuser &lt;id&gt; - Hapus approved user\n"
-                "/listusers - Lihat daftar approved users\n"
-                "/kodeunik &lt;hari&gt; - Buat kode redeem\n"
-                "/listkode - Lihat semua kode redeem\n"
-                "/broadcast &lt;pesan&gt; - Kirim pesan ke semua users\n"
-            )
-        
-        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
-    
     def start_polling(self):
-        """Memulai polling untuk memeriksa email baru secara berkala"""
-        logger.info(f"Bot dimulai, memeriksa email setiap {self.check_interval} detik")
-        logger.info(f"Owner ID: {self.owner_id}")
-        logger.info(f"Approved users: {len(self.approved_users)}")
-        
-        # Buat application untuk menangani commands
-        app = Application.builder().token(self.bot_token).build()
-        
-        # Tambahkan command handlers
-        app.add_handler(CommandHandler("start", self.cmd_start))
-        app.add_handler(CommandHandler("myid", self.cmd_myid))
-        app.add_handler(CommandHandler("adduser", self.cmd_adduser))
-        app.add_handler(CommandHandler("addakses", self.cmd_addakses))
-        app.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
-        app.add_handler(CommandHandler("listusers", self.cmd_listusers))
-        app.add_handler(CommandHandler("status", self.cmd_status))
-        app.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
-        app.add_handler(CommandHandler("kodeunik", self.cmd_kodeunik))
-        app.add_handler(CommandHandler("listkode", self.cmd_listkode))
-        app.add_handler(CommandHandler("redeem", self.cmd_redeem))
-        app.add_handler(CommandHandler("help", self.cmd_help))
-        
-        # Jadwalkan pemeriksaan email berkala menggunakan job queue
-        async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):
-            await self.process_new_emails()
-        
-        # Jalankan bot dengan polling
+        """Memulai bot dengan polling"""
         import asyncio
         
-        async def main():
-            async with app:
-                await app.start()
-                await app.updater.start_polling()
-                
-                # Jalankan pemeriksaan email pertama kali
-                await self.process_new_emails()
-                
-                # Cek expiry pertama kali
-                await self.check_and_notify_expiring_users()
-                
-                # Loop untuk pemeriksaan email dan expiry berkala
-                while True:
-                    await asyncio.sleep(self.check_interval)
+        async def run_bot():
+            # Buat application
+            application = Application.builder().token(self.bot_token).build()
+            
+            # Daftarkan command handlers
+            application.add_handler(CommandHandler("start", self.cmd_start))
+            application.add_handler(CommandHandler("myid", self.cmd_myid))
+            application.add_handler(CommandHandler("help", self.cmd_help))
+            application.add_handler(CommandHandler("set", self.cmd_set))
+            application.add_handler(CommandHandler("settings", self.cmd_settings))
+            application.add_handler(CommandHandler("testemail", self.cmd_testemail))
+            application.add_handler(CommandHandler("adduser", self.cmd_adduser))
+            application.add_handler(CommandHandler("addakses", self.cmd_addakses))
+            application.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
+            application.add_handler(CommandHandler("listusers", self.cmd_listusers))
+            application.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
+            application.add_handler(CommandHandler("status", self.cmd_status))
+            application.add_handler(CommandHandler("kodeunik", self.cmd_kodeunik))
+            application.add_handler(CommandHandler("listkode", self.cmd_listkode))
+            application.add_handler(CommandHandler("hapuskode", self.cmd_hapuskode))
+            application.add_handler(CommandHandler("redeem", self.cmd_redeem))
+            
+            # Mulai polling
+            await application.initialize()
+            await application.start()
+            await application.updater.start_polling(drop_pending_updates=True)
+            
+            logger.info("Bot started! Listening for commands...")
+            
+            # Kirim notifikasi ke owner bahwa bot sudah aktif
+            if self.owner_id:
+                try:
+                    email_status = "✅ Terkonfigurasi" if self.email_reader.is_configured() else "⚠️ Belum dikonfigurasi"
+                    await self.send_message(
+                        self.owner_id, 
+                        f"🤖 <b>Bot Aktif!</b>\n\n"
+                        f"📧 Email: {email_status}\n"
+                        f"⏱ Interval: {self.check_interval} detik\n\n"
+                        f"Gunakan /set untuk konfigurasi\n"
+                        f"Gunakan /help untuk bantuan",
+                        parse_mode=ParseMode.HTML
+                    )
+                except:
+                    pass
+            
+            # Loop utama untuk cek email dan expiry
+            while True:
+                try:
+                    # Reload settings untuk mendapatkan interval terbaru
+                    self.reload_settings()
+                    
+                    # Cek email baru
                     await self.process_new_emails()
+                    
+                    # Cek dan notifikasi user yang expired
                     await self.check_and_notify_expiring_users()
+                    
+                except Exception as e:
+                    logger.error(f"Error in main loop: {str(e)}")
+                
+                # Tunggu sesuai interval
+                await asyncio.sleep(self.check_interval)
         
-        asyncio.run(main())
-
-# Untuk menjalankan bot
-if __name__ == "__main__":
-    bot = EmailForwarderBot()
-    bot.start_polling()
+        # Jalankan bot
+        asyncio.run(run_bot())
