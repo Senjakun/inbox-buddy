@@ -21,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 # File untuk menyimpan approved users
 APPROVED_USERS_FILE = 'approved_users.json'
+# File untuk tracking notifikasi yang sudah dikirim
+NOTIFIED_USERS_FILE = 'notified_expiry.json'
+
+# Waktu notifikasi sebelum expired (dalam jam)
+NOTIFY_BEFORE_HOURS = [24, 6, 1]  # Notif 24 jam, 6 jam, 1 jam sebelum expired
 
 class EmailForwarderBot:
     def __init__(self):
@@ -37,6 +42,9 @@ class EmailForwarderBot:
         
         # Load approved users
         self.approved_users = self.load_approved_users()
+        
+        # Load notified users tracking
+        self.notified_expiry = self.load_notified_expiry()
         
         # Pastikan file config.env ada
         if not os.path.exists('config.env'):
@@ -114,6 +122,25 @@ class EmailForwarderBot:
             logger.error(f"Error parsing expiry date: {str(e)}")
             return True
     
+    def load_notified_expiry(self):
+        """Memuat tracking notifikasi expiry yang sudah dikirim"""
+        try:
+            if os.path.exists(NOTIFIED_USERS_FILE):
+                with open(NOTIFIED_USERS_FILE, 'r') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading notified expiry: {str(e)}")
+            return {}
+    
+    def save_notified_expiry(self):
+        """Menyimpan tracking notifikasi expiry"""
+        try:
+            with open(NOTIFIED_USERS_FILE, 'w') as f:
+                json.dump(self.notified_expiry, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving notified expiry: {str(e)}")
+    
     def get_active_approved_users(self):
         """Mendapatkan daftar user yang masih aktif (belum expired)"""
         active_users = []
@@ -136,12 +163,117 @@ class EmailForwarderBot:
         # Hapus user yang expired
         for user_id in expired_users:
             del self.approved_users[user_id]
+            # Hapus juga dari notified tracking
+            if user_id in self.notified_expiry:
+                del self.notified_expiry[user_id]
             logger.info(f"Removed expired user: {user_id}")
         
         if expired_users:
             self.save_approved_users()
+            self.save_notified_expiry()
         
-        return active_users
+        return active_users, expired_users
+    
+    async def check_and_notify_expiring_users(self):
+        """Memeriksa dan mengirim notifikasi ke user yang akan/sudah expired"""
+        now = datetime.now()
+        users_to_notify_expiring = []
+        users_expired = []
+        
+        for user_id, user_data in list(self.approved_users.items()):
+            expires_at = user_data.get("expires_at")
+            if expires_at is None:
+                continue  # Skip permanent users
+            
+            try:
+                expiry_date = datetime.fromisoformat(expires_at)
+                remaining = expiry_date - now
+                remaining_hours = remaining.total_seconds() / 3600
+                
+                # Jika sudah expired
+                if remaining_hours <= 0:
+                    users_expired.append(user_id)
+                    continue
+                
+                # Cek apakah perlu kirim notifikasi
+                user_notified = self.notified_expiry.get(user_id, [])
+                
+                for notify_hour in NOTIFY_BEFORE_HOURS:
+                    if remaining_hours <= notify_hour and notify_hour not in user_notified:
+                        users_to_notify_expiring.append({
+                            "user_id": user_id,
+                            "remaining_hours": remaining_hours,
+                            "notify_hour": notify_hour,
+                            "expiry_date": expiry_date
+                        })
+                        break  # Hanya kirim satu notifikasi per cek
+                        
+            except Exception as e:
+                logger.error(f"Error checking expiry for user {user_id}: {str(e)}")
+        
+        # Kirim notifikasi ke user yang akan expired
+        for user_info in users_to_notify_expiring:
+            user_id = user_info["user_id"]
+            remaining = user_info["remaining_hours"]
+            notify_hour = user_info["notify_hour"]
+            expiry_date = user_info["expiry_date"]
+            
+            if remaining < 1:
+                time_left = f"{int(remaining * 60)} menit"
+            else:
+                time_left = f"{int(remaining)} jam"
+            
+            message = (
+                f"⚠️ <b>Peringatan Akses Akan Berakhir!</b>\n\n"
+                f"Akses Anda akan berakhir dalam <b>{time_left}</b>.\n"
+                f"📅 Berakhir pada: {expiry_date.strftime('%d %B %Y, %H:%M')}\n\n"
+                f"Hubungi admin untuk perpanjangan akses."
+            )
+            
+            try:
+                await self.send_message(user_id, message)
+                
+                # Update tracking
+                if user_id not in self.notified_expiry:
+                    self.notified_expiry[user_id] = []
+                self.notified_expiry[user_id].append(notify_hour)
+                self.save_notified_expiry()
+                
+                logger.info(f"Sent expiry warning to user {user_id} ({notify_hour}h notice)")
+            except Exception as e:
+                logger.error(f"Failed to send expiry warning to {user_id}: {str(e)}")
+        
+        # Kirim notifikasi ke user yang sudah expired dan hapus dari daftar
+        for user_id in users_expired:
+            message = (
+                f"❌ <b>Akses Anda Telah Berakhir!</b>\n\n"
+                f"Akses Anda untuk menerima notifikasi email telah berakhir.\n\n"
+                f"Hubungi admin untuk memperpanjang akses."
+            )
+            
+            try:
+                await self.send_message(user_id, message)
+                logger.info(f"Sent expiry notification to user {user_id}")
+            except Exception as e:
+                logger.error(f"Failed to send expiry notification to {user_id}: {str(e)}")
+            
+            # Hapus dari approved users
+            if user_id in self.approved_users:
+                del self.approved_users[user_id]
+            if user_id in self.notified_expiry:
+                del self.notified_expiry[user_id]
+            
+            # Notifikasi ke owner
+            if self.owner_id:
+                owner_msg = f"📢 User <code>{user_id}</code> akses telah berakhir dan dihapus dari daftar."
+                try:
+                    await self.send_message(self.owner_id, owner_msg)
+                except:
+                    pass
+        
+        if users_expired:
+            self.save_approved_users()
+            self.save_notified_expiry()
     
     def add_approved_user(self, user_id, days=None):
         """Menambahkan user ke daftar approved dengan opsi durasi hari"""
@@ -208,7 +340,7 @@ class EmailForwarderBot:
     async def send_to_all_approved(self, text, parse_mode=ParseMode.HTML):
         """Mengirim pesan ke semua approved users yang aktif"""
         success_count = 0
-        active_users = self.get_active_approved_users()
+        active_users, _ = self.get_active_approved_users()
         
         for user_id in active_users:
             try:
@@ -251,7 +383,7 @@ class EmailForwarderBot:
     async def send_document_to_all_approved(self, document_data, filename, caption=None):
         """Mengirim dokumen ke semua approved users yang aktif"""
         success_count = 0
-        active_users = self.get_active_approved_users()
+        active_users, _ = self.get_active_approved_users()
         
         for user_id in active_users:
             try:
@@ -321,7 +453,7 @@ class EmailForwarderBot:
         
         logger.info(f"Ditemukan {len(emails)} email baru")
         
-        active_users = self.get_active_approved_users()
+        active_users, _ = self.get_active_approved_users()
         if not active_users:
             logger.warning("Tidak ada approved users aktif untuk menerima notifikasi")
             return
@@ -575,10 +707,10 @@ class EmailForwarderBot:
         
         # Kirim ke semua approved users
         success_count = await self.send_to_all_approved(broadcast_message)
-        active_users = len(self.get_active_approved_users())
+        active_users, _ = self.get_active_approved_users()
         
         await update.message.reply_text(
-            f"✅ Broadcast terkirim ke {success_count}/{active_users} users.",
+            f"✅ Broadcast terkirim ke {success_count}/{len(active_users)} users.",
             parse_mode=ParseMode.HTML
         )
     
@@ -660,10 +792,14 @@ class EmailForwarderBot:
                 # Jalankan pemeriksaan email pertama kali
                 await self.process_new_emails()
                 
-                # Loop untuk pemeriksaan email berkala
+                # Cek expiry pertama kali
+                await self.check_and_notify_expiring_users()
+                
+                # Loop untuk pemeriksaan email dan expiry berkala
                 while True:
                     await asyncio.sleep(self.check_interval)
                     await self.process_new_emails()
+                    await self.check_and_notify_expiring_users()
         
         asyncio.run(main())
 
