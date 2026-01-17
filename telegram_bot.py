@@ -3,8 +3,10 @@ import time
 import logging
 import schedule
 import tempfile
+import json
 from dotenv import load_dotenv
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from email_reader import EmailReader
@@ -16,18 +18,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# File untuk menyimpan approved users
+APPROVED_USERS_FILE = 'approved_users.json'
+
 class EmailForwarderBot:
     def __init__(self):
         # Memuat variabel lingkungan
         load_dotenv('config.env')
         
         self.bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-        self.channel_id = os.getenv('TELEGRAM_CHANNEL_ID')
+        self.owner_id = os.getenv('TELEGRAM_OWNER_ID')  # ID pemilik bot
         self.check_interval = int(os.getenv('CHECK_INTERVAL', 300))  # Default 5 menit
         
         # Inisialisasi bot Telegram dan pembaca email
         self.bot = Bot(token=self.bot_token)
         self.email_reader = EmailReader()
+        
+        # Load approved users
+        self.approved_users = self.load_approved_users()
         
         # Pastikan file config.env ada
         if not os.path.exists('config.env'):
@@ -36,22 +44,90 @@ class EmailForwarderBot:
                 load_dotenv('config.env.example')
             else:
                 logger.error("File konfigurasi tidak ditemukan!")
+    
+    def load_approved_users(self):
+        """Memuat daftar approved users dari file JSON"""
+        try:
+            if os.path.exists(APPROVED_USERS_FILE):
+                with open(APPROVED_USERS_FILE, 'r') as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded {len(data)} approved users")
+                    return set(str(uid) for uid in data)
+            else:
+                # Jika file tidak ada, buat dengan owner sebagai approved user pertama
+                if self.owner_id:
+                    self.save_approved_users({self.owner_id})
+                    return {self.owner_id}
+                return set()
+        except Exception as e:
+            logger.error(f"Error loading approved users: {str(e)}")
+            return set()
+    
+    def save_approved_users(self, users=None):
+        """Menyimpan daftar approved users ke file JSON"""
+        try:
+            if users is None:
+                users = self.approved_users
+            with open(APPROVED_USERS_FILE, 'w') as f:
+                json.dump(list(users), f)
+            logger.info(f"Saved {len(users)} approved users")
+        except Exception as e:
+            logger.error(f"Error saving approved users: {str(e)}")
+    
+    def is_owner(self, user_id):
+        """Memeriksa apakah user adalah owner"""
+        return str(user_id) == str(self.owner_id)
+    
+    def is_approved(self, user_id):
+        """Memeriksa apakah user sudah di-approve"""
+        return str(user_id) in self.approved_users
+    
+    def add_approved_user(self, user_id):
+        """Menambahkan user ke daftar approved"""
+        self.approved_users.add(str(user_id))
+        self.save_approved_users()
+        logger.info(f"User {user_id} added to approved list")
+    
+    def remove_approved_user(self, user_id):
+        """Menghapus user dari daftar approved"""
+        user_id_str = str(user_id)
+        if user_id_str in self.approved_users:
+            self.approved_users.discard(user_id_str)
+            self.save_approved_users()
+            logger.info(f"User {user_id} removed from approved list")
+            return True
+        return False
         
-    async def send_message(self, text, parse_mode=ParseMode.HTML):
-        """Mengirim pesan ke channel Telegram"""
+    async def send_message(self, chat_id, text, parse_mode=ParseMode.HTML):
+        """Mengirim pesan ke chat Telegram tertentu"""
         try:
             await self.bot.send_message(
-                chat_id=self.channel_id,
+                chat_id=chat_id,
                 text=text,
                 parse_mode=parse_mode
             )
             return True
         except TelegramError as e:
-            logger.error(f"Gagal mengirim pesan ke Telegram: {str(e)}")
+            logger.error(f"Gagal mengirim pesan ke {chat_id}: {str(e)}")
             return False
     
-    async def send_document(self, document_data, filename, caption=None):
-        """Mengirim dokumen ke channel Telegram"""
+    async def send_to_all_approved(self, text, parse_mode=ParseMode.HTML):
+        """Mengirim pesan ke semua approved users"""
+        success_count = 0
+        for user_id in self.approved_users:
+            try:
+                await self.bot.send_message(
+                    chat_id=user_id,
+                    text=text,
+                    parse_mode=parse_mode
+                )
+                success_count += 1
+            except TelegramError as e:
+                logger.error(f"Gagal mengirim pesan ke {user_id}: {str(e)}")
+        return success_count
+    
+    async def send_document(self, chat_id, document_data, filename, caption=None):
+        """Mengirim dokumen ke chat Telegram tertentu"""
         try:
             with tempfile.NamedTemporaryFile(delete=False) as temp_file:
                 temp_file.write(document_data)
@@ -63,7 +139,7 @@ class EmailForwarderBot:
             
             with open(temp_file_path, 'rb') as document:
                 await self.bot.send_document(
-                    chat_id=self.channel_id,
+                    chat_id=chat_id,
                     document=document,
                     filename=filename,
                     caption=caption
@@ -73,8 +149,19 @@ class EmailForwarderBot:
             os.unlink(temp_file_path)
             return True
         except Exception as e:
-            logger.error(f"Gagal mengirim dokumen ke Telegram: {str(e)}")
+            logger.error(f"Gagal mengirim dokumen ke {chat_id}: {str(e)}")
             return False
+    
+    async def send_document_to_all_approved(self, document_data, filename, caption=None):
+        """Mengirim dokumen ke semua approved users"""
+        success_count = 0
+        for user_id in self.approved_users:
+            try:
+                await self.send_document(user_id, document_data, filename, caption)
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Gagal mengirim dokumen ke {user_id}: {str(e)}")
+        return success_count
     
     def escape_html(self, text):
         """Escape karakter HTML khusus dalam teks"""
@@ -126,7 +213,7 @@ class EmailForwarderBot:
         return message
     
     async def process_new_emails(self):
-        """Memproses email baru dan mengirimkannya ke Telegram"""
+        """Memproses email baru dan mengirimkannya ke semua approved users"""
         logger.info("Memeriksa email baru...")
         emails = self.email_reader.get_new_emails()
         
@@ -136,14 +223,18 @@ class EmailForwarderBot:
         
         logger.info(f"Ditemukan {len(emails)} email baru")
         
+        if not self.approved_users:
+            logger.warning("Tidak ada approved users untuk menerima notifikasi")
+            return
+        
         for email in emails:
             try:
-                # Format dan kirim pesan
+                # Format dan kirim pesan ke semua approved users
                 message = await self.format_email_message(email)
-                success = await self.send_message(message)
+                success = await self.send_to_all_approved(message)
                 
                 # Jika gagal dengan format HTML, coba kirim tanpa format
-                if not success:
+                if success == 0:
                     logger.info("Mencoba mengirim pesan tanpa format HTML...")
                     plain_message = f"📧 Email Baru\n\n"
                     plain_message += f"Dari: {email['from']}\n"
@@ -170,44 +261,217 @@ class EmailForwarderBot:
                     if email['attachments']:
                         plain_message += f"Lampiran: {len(email['attachments'])} file\n"
                     
-                    await self.bot.send_message(
-                        chat_id=self.channel_id,
-                        text=plain_message,
-                        parse_mode=None
-                    )
+                    await self.send_to_all_approved(plain_message, parse_mode=None)
                 
-                # Kirim lampiran jika ada
+                # Kirim lampiran jika ada ke semua approved users
                 for attachment in email['attachments']:
-                    await self.send_document(
+                    await self.send_document_to_all_approved(
                         attachment['data'],
                         attachment['filename'],
                         f"Lampiran dari email: {email['subject']}"
                     )
                 
-                logger.info(f"Email dengan subjek '{email['subject']}' berhasil diteruskan")
+                logger.info(f"Email dengan subjek '{email['subject']}' berhasil diteruskan ke {len(self.approved_users)} users")
             except Exception as e:
                 logger.error(f"Gagal memproses email: {str(e)}")
+    
+    # ==================== COMMAND HANDLERS ====================
+    
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /start"""
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "Unknown"
+        
+        if self.is_approved(user_id):
+            await update.message.reply_text(
+                f"✅ Halo @{username}!\n\n"
+                f"Anda sudah terdaftar untuk menerima notifikasi email.\n"
+                f"ID Anda: <code>{user_id}</code>",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(
+                f"👋 Halo @{username}!\n\n"
+                f"Anda belum terdaftar untuk menerima notifikasi.\n"
+                f"ID Anda: <code>{user_id}</code>\n\n"
+                f"Minta owner untuk menambahkan ID Anda.",
+                parse_mode=ParseMode.HTML
+            )
+    
+    async def cmd_myid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /myid - menampilkan ID user"""
+        user_id = update.effective_user.id
+        username = update.effective_user.username or "Unknown"
+        status = "✅ Approved" if self.is_approved(user_id) else "❌ Not Approved"
+        
+        await update.message.reply_text(
+            f"👤 <b>Info User</b>\n\n"
+            f"Username: @{username}\n"
+            f"ID: <code>{user_id}</code>\n"
+            f"Status: {status}",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_adduser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /adduser <user_id> - hanya owner"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat menambahkan user.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/adduser &lt;telegram_id&gt;</code>\n\n"
+                "Contoh: <code>/adduser 123456789</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        target_id = context.args[0]
+        
+        if self.is_approved(target_id):
+            await update.message.reply_text(f"⚠️ User {target_id} sudah terdaftar.")
+            return
+        
+        self.add_approved_user(target_id)
+        await update.message.reply_text(
+            f"✅ User <code>{target_id}</code> berhasil ditambahkan ke daftar approved.",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_removeuser(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /removeuser <user_id> - hanya owner"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat menghapus user.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/removeuser &lt;telegram_id&gt;</code>\n\n"
+                "Contoh: <code>/removeuser 123456789</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        target_id = context.args[0]
+        
+        if target_id == str(self.owner_id):
+            await update.message.reply_text("⚠️ Tidak dapat menghapus owner dari daftar.")
+            return
+        
+        if self.remove_approved_user(target_id):
+            await update.message.reply_text(
+                f"✅ User <code>{target_id}</code> berhasil dihapus dari daftar approved.",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            await update.message.reply_text(f"⚠️ User {target_id} tidak ditemukan dalam daftar.")
+    
+    async def cmd_listusers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /listusers - hanya owner"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat melihat daftar user.")
+            return
+        
+        if not self.approved_users:
+            await update.message.reply_text("📋 Tidak ada approved users.")
+            return
+        
+        user_list = "\n".join([f"• <code>{uid}</code>" + (" 👑" if uid == str(self.owner_id) else "") for uid in self.approved_users])
+        await update.message.reply_text(
+            f"📋 <b>Daftar Approved Users ({len(self.approved_users)}):</b>\n\n{user_list}\n\n👑 = Owner",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /status"""
+        user_id = update.effective_user.id
+        
+        if not self.is_approved(user_id):
+            await update.message.reply_text("❌ Anda tidak memiliki akses ke perintah ini.")
+            return
+        
+        status_msg = (
+            f"📊 <b>Status Bot</b>\n\n"
+            f"✅ Bot aktif\n"
+            f"⏱ Interval cek: {self.check_interval} detik\n"
+            f"👥 Approved users: {len(self.approved_users)}\n"
+            f"📧 Email host: {self.email_reader.host}\n"
+            f"📬 Folder: {self.email_reader.folder}"
+        )
+        
+        await update.message.reply_text(status_msg, parse_mode=ParseMode.HTML)
+    
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /help"""
+        user_id = update.effective_user.id
+        
+        help_text = (
+            "📖 <b>Daftar Perintah</b>\n\n"
+            "/start - Mulai bot\n"
+            "/myid - Lihat ID Telegram Anda\n"
+            "/status - Cek status bot\n"
+            "/help - Tampilkan bantuan\n"
+        )
+        
+        if self.is_owner(user_id):
+            help_text += (
+                "\n<b>🔐 Perintah Owner:</b>\n"
+                "/adduser &lt;id&gt; - Tambah approved user\n"
+                "/removeuser &lt;id&gt; - Hapus approved user\n"
+                "/listusers - Lihat daftar approved users\n"
+            )
+        
+        await update.message.reply_text(help_text, parse_mode=ParseMode.HTML)
     
     def start_polling(self):
         """Memulai polling untuk memeriksa email baru secara berkala"""
         logger.info(f"Bot dimulai, memeriksa email setiap {self.check_interval} detik")
+        logger.info(f"Owner ID: {self.owner_id}")
+        logger.info(f"Approved users: {len(self.approved_users)}")
         
-        # Jalankan pertama kali
+        # Buat application untuk menangani commands
+        app = Application.builder().token(self.bot_token).build()
+        
+        # Tambahkan command handlers
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("myid", self.cmd_myid))
+        app.add_handler(CommandHandler("adduser", self.cmd_adduser))
+        app.add_handler(CommandHandler("removeuser", self.cmd_removeuser))
+        app.add_handler(CommandHandler("listusers", self.cmd_listusers))
+        app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("help", self.cmd_help))
+        
+        # Jadwalkan pemeriksaan email berkala menggunakan job queue
+        async def check_emails_job(context: ContextTypes.DEFAULT_TYPE):
+            await self.process_new_emails()
+        
+        # Jalankan bot dengan polling
         import asyncio
-        asyncio.run(self.process_new_emails())
         
-        # Jadwalkan pemeriksaan berkala
-        schedule.every(self.check_interval).seconds.do(
-            lambda: asyncio.run(self.process_new_emails())
-        )
+        async def main():
+            async with app:
+                await app.start()
+                await app.updater.start_polling()
+                
+                # Jalankan pemeriksaan email pertama kali
+                await self.process_new_emails()
+                
+                # Loop untuk pemeriksaan email berkala
+                while True:
+                    await asyncio.sleep(self.check_interval)
+                    await self.process_new_emails()
         
-        # Loop utama
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
+        asyncio.run(main())
 
 # Untuk menjalankan bot
 if __name__ == "__main__":
     bot = EmailForwarderBot()
     bot.start_polling()
-
