@@ -1,0 +1,10 @@
+{
+  "email_host": "imap.gmail.com",
+  "email_port": 993,
+  "email_username": "",
+  "email_password": "",
+  "email_folder": "INBOX",
+  "filter_sender": "support@info.airwallex.com",
+  "filter_subject": "Your one-time passcode is",
+  "check_interval": 2
+}
