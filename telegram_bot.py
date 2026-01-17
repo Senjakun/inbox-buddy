@@ -4,6 +4,8 @@ import logging
 import schedule
 import tempfile
 import json
+import random
+import string
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Bot, Update
@@ -23,8 +25,8 @@ logger = logging.getLogger(__name__)
 APPROVED_USERS_FILE = 'approved_users.json'
 # File untuk tracking notifikasi yang sudah dikirim
 NOTIFIED_USERS_FILE = 'notified_expiry.json'
-
-# Tracking user yang sudah dinotifikasi expired (agar tidak spam)
+# File untuk menyimpan kode redeem
+REDEEM_CODES_FILE = 'redeem_codes.json'
 
 class EmailForwarderBot:
     def __init__(self):
@@ -44,6 +46,9 @@ class EmailForwarderBot:
         
         # Load notified users tracking
         self.notified_expiry = self.load_notified_expiry()
+        
+        # Load redeem codes
+        self.redeem_codes = self.load_redeem_codes()
         
         # Pastikan file config.env ada
         if not os.path.exists('config.env'):
@@ -139,6 +144,70 @@ class EmailForwarderBot:
                 json.dump(self.notified_expiry, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving notified expiry: {str(e)}")
+    
+    def load_redeem_codes(self):
+        """Memuat daftar kode redeem dari file JSON"""
+        try:
+            if os.path.exists(REDEEM_CODES_FILE):
+                with open(REDEEM_CODES_FILE, 'r') as f:
+                    data = json.load(f)
+                    logger.info(f"Loaded {len(data)} redeem codes")
+                    return data
+            return {}
+        except Exception as e:
+            logger.error(f"Error loading redeem codes: {str(e)}")
+            return {}
+    
+    def save_redeem_codes(self):
+        """Menyimpan daftar kode redeem ke file JSON"""
+        try:
+            with open(REDEEM_CODES_FILE, 'w') as f:
+                json.dump(self.redeem_codes, f, indent=2)
+            logger.info(f"Saved {len(self.redeem_codes)} redeem codes")
+        except Exception as e:
+            logger.error(f"Error saving redeem codes: {str(e)}")
+    
+    def generate_unique_code(self, length=6):
+        """Generate kode unik acak (huruf dan angka)"""
+        characters = string.ascii_uppercase + string.digits
+        while True:
+            code = ''.join(random.choices(characters, k=length))
+            # Pastikan kode belum digunakan
+            if code not in self.redeem_codes:
+                return code
+    
+    def create_redeem_code(self, days):
+        """Membuat kode redeem baru dengan durasi tertentu"""
+        code = self.generate_unique_code()
+        self.redeem_codes[code] = {
+            "days": days,
+            "created_at": datetime.now().isoformat(),
+            "created_by": self.owner_id,
+            "used": False,
+            "used_by": None,
+            "used_at": None
+        }
+        self.save_redeem_codes()
+        return code
+    
+    def use_redeem_code(self, code, user_id):
+        """Menggunakan kode redeem, return days jika valid, None jika tidak"""
+        code = code.upper()
+        if code not in self.redeem_codes:
+            return None, "Kode tidak ditemukan."
+        
+        code_data = self.redeem_codes[code]
+        if code_data["used"]:
+            return None, "Kode sudah pernah digunakan."
+        
+        # Tandai kode sudah digunakan
+        days = code_data["days"]
+        self.redeem_codes[code]["used"] = True
+        self.redeem_codes[code]["used_by"] = str(user_id)
+        self.redeem_codes[code]["used_at"] = datetime.now().isoformat()
+        self.save_redeem_codes()
+        
+        return days, None
     
     def get_active_approved_users(self):
         """Mendapatkan daftar user yang masih aktif (belum expired)"""
@@ -689,6 +758,132 @@ class EmailForwarderBot:
         
         await update.message.reply_text(status_msg, parse_mode=ParseMode.HTML)
     
+    async def cmd_kodeunik(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /kodeunik <hari> - hanya owner, generate kode redeem"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat membuat kode.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/kodeunik &lt;hari&gt;</code>\n\n"
+                "Contoh: <code>/kodeunik 7</code> untuk membuat kode dengan akses 7 hari",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        try:
+            days = int(context.args[0])
+            if days <= 0:
+                await update.message.reply_text("⚠️ Jumlah hari harus lebih dari 0.")
+                return
+        except ValueError:
+            await update.message.reply_text("⚠️ Jumlah hari harus berupa angka.")
+            return
+        
+        # Generate kode unik
+        code = self.create_redeem_code(days)
+        
+        await update.message.reply_text(
+            f"🎫 <b>Kode Redeem Berhasil Dibuat!</b>\n\n"
+            f"📋 Kode: <code>{code}</code>\n"
+            f"⏱ Durasi: {days} hari\n\n"
+            f"Bagikan kode ini ke user. User dapat menggunakan:\n"
+            f"<code>/redeem {code}</code>",
+            parse_mode=ParseMode.HTML
+        )
+    
+    async def cmd_listkode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /listkode - hanya owner, lihat semua kode"""
+        user_id = update.effective_user.id
+        
+        if not self.is_owner(user_id):
+            await update.message.reply_text("❌ Hanya owner yang dapat melihat daftar kode.")
+            return
+        
+        if not self.redeem_codes:
+            await update.message.reply_text("📋 Tidak ada kode redeem.")
+            return
+        
+        active_codes = []
+        used_codes = []
+        
+        for code, data in self.redeem_codes.items():
+            if data["used"]:
+                used_codes.append(f"• <code>{code}</code> ({data['days']} hari) - ✅ Digunakan oleh {data['used_by']}")
+            else:
+                active_codes.append(f"• <code>{code}</code> ({data['days']} hari) - 🟢 Aktif")
+        
+        message = f"🎫 <b>Daftar Kode Redeem</b>\n\n"
+        
+        if active_codes:
+            message += f"<b>🟢 Kode Aktif ({len(active_codes)}):</b>\n" + "\n".join(active_codes) + "\n\n"
+        
+        if used_codes:
+            message += f"<b>✅ Kode Terpakai ({len(used_codes)}):</b>\n" + "\n".join(used_codes[-10:])  # Tampilkan 10 terakhir
+            if len(used_codes) > 10:
+                message += f"\n... dan {len(used_codes) - 10} lainnya"
+        
+        await update.message.reply_text(message, parse_mode=ParseMode.HTML)
+    
+    async def cmd_redeem(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handler untuk command /redeem <kode> - untuk user redeem kode"""
+        user_id = update.effective_user.id
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 <b>Cara penggunaan:</b>\n"
+                "<code>/redeem &lt;kode&gt;</code>\n\n"
+                "Contoh: <code>/redeem ABC123</code>",
+                parse_mode=ParseMode.HTML
+            )
+            return
+        
+        code = context.args[0].upper()
+        
+        # Cek apakah user sudah punya akses
+        if self.is_approved(user_id):
+            user_data = self.approved_users.get(str(user_id), {})
+            expires_at = user_data.get("expires_at")
+            if expires_at is None:
+                await update.message.reply_text("✅ Anda sudah memiliki akses permanen!")
+                return
+        
+        # Gunakan kode
+        days, error = self.use_redeem_code(code, user_id)
+        
+        if error:
+            await update.message.reply_text(f"❌ {error}")
+            return
+        
+        # Tambahkan akses ke user
+        expires_at = self.add_approved_user(user_id, days=days)
+        expiry_date = datetime.fromisoformat(expires_at)
+        
+        await update.message.reply_text(
+            f"🎉 <b>Kode Berhasil Digunakan!</b>\n\n"
+            f"✅ Anda sekarang memiliki akses selama <b>{days} hari</b>.\n"
+            f"📅 Berlaku hingga: {expiry_date.strftime('%d %B %Y, %H:%M')}\n\n"
+            f"Anda akan menerima notifikasi email dari bot ini.",
+            parse_mode=ParseMode.HTML
+        )
+        
+        # Notifikasi ke owner
+        if self.owner_id:
+            owner_msg = (
+                f"📢 <b>Kode Digunakan!</b>\n\n"
+                f"👤 User: <code>{user_id}</code>\n"
+                f"🎫 Kode: <code>{code}</code>\n"
+                f"⏱ Durasi: {days} hari"
+            )
+            try:
+                await self.send_message(self.owner_id, owner_msg)
+            except:
+                pass
+    
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handler untuk command /help"""
         user_id = update.effective_user.id
@@ -697,6 +892,7 @@ class EmailForwarderBot:
             "📖 <b>Daftar Perintah</b>\n\n"
             "/start - Mulai bot\n"
             "/myid - Lihat ID Telegram Anda\n"
+            "/redeem &lt;kode&gt; - Gunakan kode akses\n"
             "/status - Cek status bot\n"
             "/help - Tampilkan bantuan\n"
         )
@@ -708,6 +904,8 @@ class EmailForwarderBot:
                 "/addakses &lt;id&gt; &lt;hari&gt; - Tambah user dengan durasi\n"
                 "/removeuser &lt;id&gt; - Hapus approved user\n"
                 "/listusers - Lihat daftar approved users\n"
+                "/kodeunik &lt;hari&gt; - Buat kode redeem\n"
+                "/listkode - Lihat semua kode redeem\n"
                 "/broadcast &lt;pesan&gt; - Kirim pesan ke semua users\n"
             )
         
@@ -731,6 +929,9 @@ class EmailForwarderBot:
         app.add_handler(CommandHandler("listusers", self.cmd_listusers))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("broadcast", self.cmd_broadcast))
+        app.add_handler(CommandHandler("kodeunik", self.cmd_kodeunik))
+        app.add_handler(CommandHandler("listkode", self.cmd_listkode))
+        app.add_handler(CommandHandler("redeem", self.cmd_redeem))
         app.add_handler(CommandHandler("help", self.cmd_help))
         
         # Jadwalkan pemeriksaan email berkala menggunakan job queue
