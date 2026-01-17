@@ -11,6 +11,7 @@ Bot Telegram yang dapat memforward email dari akun email ke channel Telegram pri
 - Memeriksa email secara berkala sesuai interval yang dikonfigurasi
 - Mendukung koneksi email melalui IMAP
 - Menampilkan informasi lengkap dari email (pengirim, subjek, tanggal, dan isi)
+- **Konfigurasi via Telegram** - Setup email langsung dari bot Telegram
 
 ## Persyaratan
 
@@ -18,152 +19,169 @@ Bot Telegram yang dapat memforward email dari akun email ke channel Telegram pri
 - Akun email dengan akses IMAP
 - Bot Telegram dan channel private
 
-## Instalasi
+---
 
-1. Clone repositori ini:
+## 🚀 Instalasi di VPS (Digital Ocean Ubuntu)
 
+### Step 1: Connect ke VPS
 ```bash
+ssh root@IP_VPS_ANDA
+```
+
+### Step 2: Update Sistem & Install Dependencies
+```bash
+# Update sistem
+sudo apt update && sudo apt upgrade -y
+
+# Install Python dan dependencies (PENTING: install python3.12-venv)
+sudo apt install python3 python3-pip python3-venv python3.12-venv git -y
+
+# Install PM2 untuk menjalankan bot 24/7
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install nodejs -y
+sudo npm install -g pm2
+```
+
+### Step 3: Clone Repository
+```bash
+cd ~
 git clone https://github.com/Senjakun/inbox-buddy.git
 cd inbox-buddy
 ```
 
-2. Instal dependensi:
-
+### Step 4: Setup Virtual Environment
 ```bash
+# Buat virtual environment
+python3 -m venv venv
+
+# Aktifkan virtual environment
+source venv/bin/activate
+
+# Install requirements
 pip install -r requirements.txt
 ```
 
-3. Salin file konfigurasi contoh:
-
+### Step 5: Jalankan Bot (Setup Interaktif)
 ```bash
-cp config.env.example config.env
+# Jalankan bot pertama kali - akan diminta input Token & Owner ID
+python main.py
 ```
 
-4. Edit file `config.env` dan isi dengan informasi yang sesuai:
+Bot akan meminta:
+1. **TELEGRAM_BOT_TOKEN** - Dapat dari @BotFather
+2. **TELEGRAM_OWNER_ID** - ID Telegram Anda (dapat dari @userinfobot)
 
+### Step 6: Jalankan dengan PM2 (24/7)
+```bash
+# Setelah setup selesai, jalankan dengan PM2
+pm2 start main.py --name yuki-bot --interpreter ~/inbox-buddy/venv/bin/python
+
+# Simpan konfigurasi PM2
+pm2 save
+
+# Auto-start saat reboot
+pm2 startup
+# Jalankan command yang muncul
 ```
-# Konfigurasi Bot Telegram
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
-TELEGRAM_CHANNEL_ID=your_channel_id_here
 
-# Konfigurasi Email
-EMAIL_HOST=imap.example.com
-EMAIL_PORT=993
-EMAIL_USERNAME=your_email@example.com
-EMAIL_APP_PASSWORD=your_app_password_here
-EMAIL_FOLDER=INBOX
-
-# Interval cek email dalam detik
-CHECK_INTERVAL=300
+### Commands PM2 Berguna:
+```bash
+pm2 status          # Lihat status bot
+pm2 logs yuki-bot   # Lihat log bot
+pm2 restart yuki-bot # Restart bot
+pm2 stop yuki-bot   # Stop bot
 ```
 
-## Cara Mendapatkan Sandi Aplikasi Email
+---
 
-Untuk keamanan yang lebih baik, bot ini menggunakan sandi aplikasi untuk mengakses email Anda. Berikut cara mendapatkannya:
+## 📱 Konfigurasi via Telegram
 
-### Gmail:
-1. Buka [Pengaturan Keamanan Google](https://myaccount.google.com/security)
-2. Aktifkan verifikasi 2 langkah jika belum
-3. Pilih "Sandi Aplikasi"
-4. Pilih "Aplikasi Lainnya" dan beri nama (misalnya "Telegram Email Bot")
-5. Salin sandi aplikasi yang dihasilkan dan gunakan sebagai `EMAIL_APP_PASSWORD`
+Setelah bot berjalan, konfigurasi email langsung dari Telegram:
 
-### Yahoo Mail:
-1. Buka [Pengaturan Akun](https://login.yahoo.com/account/security)
-2. Aktifkan verifikasi 2 langkah
-3. Pilih "Kelola sandi aplikasi"
-4. Pilih "Lainnya" dan beri nama
-5. Salin sandi yang dihasilkan
+### Commands Bot:
+| Command | Deskripsi |
+|---------|-----------|
+| `/start` | Mulai bot |
+| `/help` | Tampilkan bantuan |
+| `/settings` | Lihat semua pengaturan |
+| `/set email_host <host>` | Set host email (misal: imap-mail.outlook.com) |
+| `/set email_user <email>` | Set email address |
+| `/set email_pass <password>` | Set app password |
+| `/set filter_sender <email>` | Filter email dari pengirim tertentu |
+| `/set filter_subject <keyword>` | Filter email dengan subjek tertentu |
+| `/set check_interval <menit>` | Set interval cek email |
+| `/testemail` | Test koneksi email |
 
-### Outlook/Hotmail:
-1. Buka [Pengaturan Keamanan](https://account.live.com/proofs/Manage/additional)
-2. Aktifkan verifikasi 2 langkah
-3. Pilih "Sandi Aplikasi"
-4. Buat sandi aplikasi baru
+### Contoh Setup Email:
+```
+/set email_host imap-mail.outlook.com
+/set email_user your-email@outlook.com
+/set email_pass your-app-password
+/set check_interval 1
+/testemail
+```
 
-## Cara Mendapatkan Token Bot dan Channel ID
+---
+
+## 🔑 Cara Mendapatkan Kredensial
 
 ### Mendapatkan Token Bot:
 1. Buka Telegram dan cari [@BotFather](https://t.me/BotFather)
 2. Kirim perintah `/newbot` dan ikuti instruksinya
 3. Setelah selesai, Anda akan mendapatkan token bot
 
-### Mendapatkan Channel ID:
-1. Buat channel private di Telegram
-2. Tambahkan bot Anda sebagai admin channel dengan izin "Post Messages"
-3. Kirim pesan ke channel
-4. Akses URL: `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates`
-5. Cari nilai `chat.id` yang dimulai dengan `-100`
+### Mendapatkan Owner ID:
+1. Buka Telegram dan cari [@userinfobot](https://t.me/userinfobot)
+2. Kirim `/start` untuk mendapatkan ID Anda
 
-## Menjalankan Bot
+### Cara Mendapatkan App Password Email:
 
-### Di Windows
+#### Gmail:
+1. Buka [Pengaturan Keamanan Google](https://myaccount.google.com/security)
+2. Aktifkan verifikasi 2 langkah
+3. Pilih "Sandi Aplikasi"
+4. Buat sandi aplikasi baru
 
-Anda dapat menggunakan salah satu dari dua cara berikut:
+#### Outlook/Hotmail:
+1. Buka [Pengaturan Keamanan](https://account.live.com/proofs/Manage/additional)
+2. Aktifkan verifikasi 2 langkah
+3. Pilih "Sandi Aplikasi"
+4. Buat sandi aplikasi baru
 
-1. Menggunakan file batch:
-   - Klik dua kali pada file `run_bot.bat`
+#### Yahoo Mail:
+1. Buka [Pengaturan Akun](https://login.yahoo.com/account/security)
+2. Aktifkan verifikasi 2 langkah
+3. Pilih "Kelola sandi aplikasi"
 
-2. Menggunakan PowerShell:
-   - Klik kanan pada file `run_bot.ps1`
-   - Pilih "Run with PowerShell"
+---
 
-### Di Linux/macOS
+## 📋 Host IMAP Email
 
-```bash
-python main.py
-```
+| Provider | Host |
+|----------|------|
+| Gmail | `imap.gmail.com` |
+| Outlook/Hotmail | `imap-mail.outlook.com` |
+| Yahoo | `imap.mail.yahoo.com` |
 
-Untuk menjalankan bot secara terus-menerus di server, Anda dapat menggunakan tools seperti `screen`, `tmux`, atau `systemd`.
+---
 
-### Menggunakan PM2 (Recommended)
-
-```bash
-pm2 start main.py --name email-bot --interpreter python3
-pm2 save
-pm2 startup
-```
-
-### Contoh Konfigurasi Systemd
-
-Buat file `/etc/systemd/system/telegram-email-forwarder.service`:
-
-```
-[Unit]
-Description=Telegram Email Forwarder Bot
-After=network.target
-
-[Service]
-User=yourusername
-WorkingDirectory=/path/to/inbox-buddy
-ExecStart=/usr/bin/python3 /path/to/inbox-buddy/main.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Kemudian aktifkan dan jalankan service:
-
-```bash
-sudo systemctl enable telegram-email-forwarder
-sudo systemctl start telegram-email-forwarder
-```
-
-## Pemecahan Masalah
+## 🔧 Pemecahan Masalah
 
 ### Bot tidak menerima email
 - Pastikan pengaturan IMAP diaktifkan di akun email Anda
 - Periksa apakah sandi aplikasi yang digunakan sudah benar
-- Pastikan Anda menggunakan sandi aplikasi, bukan sandi akun utama
-- Periksa apakah server email mengizinkan akses IMAP dari alamat IP Anda
-- Untuk Gmail, pastikan "Akses aplikasi yang kurang aman" diizinkan jika Anda tidak menggunakan sandi aplikasi
+- Gunakan `/testemail` untuk test koneksi
 
-### Bot tidak mengirim pesan ke channel
-- Pastikan bot adalah admin di channel
-- Periksa apakah TELEGRAM_CHANNEL_ID sudah benar
-- Periksa log untuk error spesifik
+### Bot tidak mengirim pesan
+- Pastikan bot adalah admin di channel (jika forward ke channel)
+- Periksa log dengan `pm2 logs yuki-bot`
+
+### Error "python3.12-venv not found"
+```bash
+sudo apt install python3.12-venv -y
+```
+
+---
 
 ## Lisensi
 
